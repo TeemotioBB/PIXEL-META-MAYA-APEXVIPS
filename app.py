@@ -205,12 +205,19 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 logger.info("Construindo Application do Telegram...")
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-# REGISTRO DOS HANDLERS (A ordem CallbackQueryHandler é essencial aqui)
+# --- REGISTRO DOS HANDLERS (ORDEM IMPORTA) ---
 application.add_handler(CommandHandler("start", start_handler))
+
+# NOVO: Escuta cliques em botões (Callback)
 application.add_handler(CallbackQueryHandler(button_click_handler))
+
+# NOVO: Escuta quando o bot EDITA a mensagem (Gatilho da ApexVips)
+application.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, message_handler))
+
+# Escuta mensagens novas de texto
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
-logger.info("Handlers registrados: /start + Cliques de Botão + Mensagens")
+logger.info("Handlers atualizados: /start + Cliques + Edições de Mensagem")
 
 # Cria um loop dedicado que roda em thread separada
 bot_loop = asyncio.new_event_loop()
