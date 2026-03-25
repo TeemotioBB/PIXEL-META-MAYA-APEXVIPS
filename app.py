@@ -2,7 +2,7 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║                APEX VIPS BOT - META CAPI MAX POWER (Nicho Hot)               ║
-║                 Apenas sinais ideais para Meta Ads - Botões já existentes    ║
+║          Apenas sinais fortes para Meta Ads - Botões já existentes           ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -16,7 +16,7 @@ from flask import Flask, request
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
-# ====================== META CAPI - CONFIG ======================
+# ====================== CONFIGURAÇÃO ======================
 PIXEL_ID = "735253462874774"
 ACCESS_TOKEN = "EAANRM9QJv7YBRG54vW9VkOT3rgEQDry9PA2UzN7HsdauowZBDKZB0e1MtvZBvUuUSc9Ub2I96psCQTl0PZBRoIG7ElDCyMU7uO2idnf0nrebj4u3f7ZA396AGXCrBZC4NljW8OURxBu4qi5zGFZBEaWVtqlfwdZCoqGFeJ238YqE86c2tfwjdjBBJ52xLX3xZCh1sqwZDZD"
 
@@ -27,12 +27,13 @@ def hash_data(value: str) -> str:
 import redis
 r = redis.from_url(os.getenv("REDIS_URL"), decode_responses=True)
 
-# ====================== EVENTOS CAPI OTIMIZADOS PARA NICHO HOT ======================
+# ====================== FLASK APP (DEVE FICAR AQUI NO TOPO) ======================
+app = Flask(__name__)
+
+# ====================== EVENTOS CAPI ======================
 def enviar_lead_capi(uid: int, trigger: str):
-    """Lead com sinais fortes para nicho hot"""
     if r.exists(f"lead_sent:{uid}:{date.today()}"):
         return
-
     r.set(f"lead_sent:{uid}:{date.today()}", "1", ex=86400)
 
     payload = {
@@ -61,10 +62,10 @@ def enviar_lead_capi(uid: int, trigger: str):
     }
 
     try:
-        requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=12)
-        logging.info(f"✅ LEAD SUPER_HOT → {uid} | Trigger: {trigger}")
+        requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=15)
+        logging.info(f"✅ LEAD SUPER_HOT → UID: {uid} | Trigger: {trigger}")
     except Exception as e:
-        logging.error(f"Lead erro: {e}")
+        logging.error(f"❌ Lead erro: {e}")
 
 
 def enviar_initiatecheckout_capi(uid: int):
@@ -90,14 +91,14 @@ def enviar_initiatecheckout_capi(uid: int):
     }
 
     try:
-        requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=12)
-        logging.info(f"✅ INITIATECHECKOUT → {uid}")
+        requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=15)
+        logging.info(f"✅ INITIATECHECKOUT → UID: {uid}")
     except Exception as e:
-        logging.error(f"InitiateCheckout erro: {e}")
+        logging.error(f"❌ InitiateCheckout erro: {e}")
 
 
 def enviar_purchase_capi(uid: int, valor: float = 12.90, tx_id: str = None):
-    if not tx_id:
+    if tx_id is None:
         tx_id = f"pix_{uid}_{int(time.time())}"
 
     payload = {
@@ -123,65 +124,85 @@ def enviar_purchase_capi(uid: int, valor: float = 12.90, tx_id: str = None):
     }
 
     try:
-        requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=12)
-        logging.info(f"✅ PURCHASE → {uid} | R${valor}")
+        requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=15)
+        logging.info(f"✅ PURCHASE → UID: {uid} | R${valor:.2f}")
     except Exception as e:
-        logging.error(f"Purchase erro: {e}")
+        logging.error(f"❌ Purchase erro: {e}")
 
 
 # ====================== HANDLERS ======================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    logging.info(f"🚀 Usuário iniciou ApexVips: {uid}")
-    
-    enviar_lead_capi(uid, trigger="start")   # Sinal mais importante no começo
+    logging.info(f"🚀 /start ApexVips: {uid}")
+    enviar_lead_capi(uid, trigger="start")
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = (update.message.text or "").lower().strip()
 
-    # Qualquer mensagem do usuário = interesse → Lead forte
     enviar_lead_capi(uid, trigger="user_message")
 
-    # Se mencionar pagamento → sinal ainda mais quente
     if any(kw in text for kw in ["pix", "pagar", "pagamento", "qr", "como pago", "valor", "preço", "preco"]):
         enviar_lead_capi(uid, trigger="payment_intent")
-        enviar_initiatecheckout_capi(uid)   # Reforça intenção de compra
+        enviar_initiatecheckout_capi(uid)
 
 
-# ====================== COMANDO PARA ADMIN CONFIRMAR COMPRA ======================
 async def compra_confirmada_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in [1293602874]:  # Coloque seus IDs de admin aqui
+    if update.effective_user.id not in [1293602874]:
         return
-
     try:
         uid = int(context.args[0])
         valor = float(context.args[1]) if len(context.args) > 1 else 12.90
         tx_id = context.args[2] if len(context.args) > 2 else None
-
         enviar_purchase_capi(uid, valor=valor, tx_id=tx_id)
-        await update.message.reply_text(f"✅ PURCHASE enviado para UID {uid} | R${valor}")
+        await update.message.reply_text(f"✅ PURCHASE enviado para UID {uid}")
     except:
         await update.message.reply_text("Uso: /compra_confirmada <user_id> [valor] [tx_id]")
 
 
-# ====================== SETUP ======================
-def main():
-    TOKEN = os.getenv("TELEGRAM_TOKEN_APEX")
-    if not TOKEN:
-        raise ValueError("Configure TELEGRAM_TOKEN_APEX")
+# ====================== REGISTRO DOS HANDLERS ======================
+application = Application.builder().token(os.getenv("TELEGRAM_TOKEN_APEX")).build()
 
-    application = Application.builder().token(TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start_handler))
-    application.add_handler(CommandHandler("compra_confirmada", compra_confirmada_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-
-    logging.info("🚀 ApexVips Bot iniciado - CAPI otimizado para nicho HOT")
-    application.run_polling()  # ou configure webhook como você já faz no Maya
+application.add_handler(CommandHandler("start", start_handler))
+application.add_handler(CommandHandler("compra_confirmada", compra_confirmada_handler))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
 
+# ====================== ROTAS FLASK ======================
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    try:
+        data = request.json
+        if data:
+            update = Update.de_json(data, application.bot)
+            application.update_queue.put(update)
+        return "ok", 200
+    except Exception as e:
+        logging.error(f"Webhook erro: {e}")
+        return "error", 500
+
+@app.route("/set-webhook", methods=["GET"])
+def set_webhook():
+    try:
+        base_url = os.getenv("WEBHOOK_BASE_URL")
+        if not base_url:
+            return "WEBHOOK_BASE_URL não configurada", 400
+        webhook_url = base_url.rstrip("/") + "/webhook"
+        
+        async def setup():
+            await application.bot.delete_webhook(drop_pending_updates=True)
+            await application.bot.set_webhook(webhook_url)
+        import asyncio
+        asyncio.run(setup())
+        return f"✅ Webhook configurado: {webhook_url}", 200
+    except Exception as e:
+        return f"❌ Erro: {str(e)}", 500
+
+
+# ====================== START ======================
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    main()
+    logging.info("🚀 ApexVips Bot iniciado - CAPI otimizado para nicho HOT")
+    port = int(os.getenv("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
