@@ -259,6 +259,48 @@ def webhook():
         logger.error(f"❌ Erro no webhook: {e}")
         return "error", 500
 
+# NOVO: Rota para o Webhook da ApexVips
+@app.route('/apex-webhook', methods=['POST'])
+def apex_webhook():
+    """
+    Recebe os avisos da ApexVips (Joined, Created, Approved)
+    Configure esta URL no painel da ApexVips:
+    https://pixel-meta-maya-apexvips-production.up.railway.app/apex-webhook
+    """
+    data = request.get_json()
+    if not data:
+        return "Sem dados", 200 # Retornamos 200 para evitar retentativas infinitas da Apex
+
+    evento = data.get("event")
+    customer = data.get("customer", {})
+    uid = customer.get("chat_id")
+    transaction = data.get("transaction", {})
+    
+    # Converte centavos da ApexVips para Real (ex: 1881 -> 18.81)
+    valor_centavos = transaction.get("plan_value", 0)
+    valor_real = float(valor_centavos) / 100 if valor_centavos > 0 else 0.0
+
+    logger.info(f"📩 [APEX WEBHOOK] Evento: {evento} | UID: {uid} | Valor: R$ {valor_real}")
+
+    if not uid:
+        return "UID não identificado", 200
+
+    # 1. Alguém entrou no Bot
+    if evento == "user_joined":
+        enviar_lead_capi(uid, "apex_user_joined")
+
+    # 2. Alguém clicou no botão e GEROU o PIX (InitiateCheckout)
+    elif evento == "payment_created":
+        logger.info(f"🔥 [CHECKOUT] Usuário {uid} gerou um PIX. Enviando CAPI...")
+        enviar_initiatecheckout_capi(uid)
+
+    # 3. Alguém PAGOU o PIX (Purchase)
+    elif evento == "payment_approved":
+        logger.info(f"✅ [VENDA] Pagamento aprovado para UID {uid}. Valor: {valor_real}")
+        enviar_purchase_capi(uid, valor_real)
+
+    return "OK", 200
+
 
 @app.route("/set-webhook", methods=["GET"])
 def set_webhook():
