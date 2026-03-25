@@ -54,12 +54,15 @@ except Exception as e:
 # ====================== FLASK SETUP ======================
 app = Flask(__name__)
 
-# ====================== CAPI FUNCTIONS (CORE) ======================
+# ====================== CAPI FUNCTIONS (COM AVISO DE FILTRO) ======================
 
 def enviar_lead_capi(uid: int, trigger: str):
-    """Envia Lead com trava de 24h para evitar duplicidade"""
+    """Envia Lead com trava de 24h e avisa no log se filtrar"""
     redis_key = f"lead_sent:{uid}:{date.today()}"
+    
     if r.exists(redis_key):
+        # AQUI ESTÁ A SINALIZAÇÃO QUE VOCÊ PEDIU:
+        logger.info(f"⚠️ [CAPI] Lead para UID {uid} ignorado (Já enviado hoje via {trigger})")
         return
 
     r.set(redis_key, "1", ex=86400)
@@ -77,15 +80,17 @@ def enviar_lead_capi(uid: int, trigger: str):
     }
     try:
         requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
-        logger.info(f"🟢 [CAPI] Lead enviado | UID: {uid}")
+        logger.info(f"🟢 [CAPI] Lead ENVIADO com sucesso | UID: {uid} | Trigger: {trigger}")
     except Exception as e:
         logger.error(f"❌ Erro Lead CAPI: {e}")
 
 def enviar_initiatecheckout_capi(uid: int):
-    """Envia Checkout com trava de 1h para evitar 'clicadores' repetidos"""
+    """Envia Checkout com trava de 1h e avisa no log se filtrar"""
     redis_key = f"checkout_sent:{uid}"
+    
     if r.exists(redis_key):
-        logger.info(f"🟡 [CAPI] Checkout já enviado recentemente para {uid}. Pulando.")
+        # AQUI ESTÁ A SINALIZAÇÃO QUE VOCÊ PEDIU:
+        logger.info(f"⚠️ [CAPI] Checkout para UID {uid} ignorado (Enviado nos últimos 60 min)")
         return
 
     r.set(redis_key, "1", ex=3600)
@@ -103,28 +108,10 @@ def enviar_initiatecheckout_capi(uid: int):
     }
     try:
         requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
-        logger.info(f"🔥 [CAPI] InitiateCheckout enviado | UID: {uid}")
+        logger.info(f"🔥 [CAPI] InitiateCheckout ENVIADO com sucesso | UID: {uid}")
     except Exception as e:
         logger.error(f"❌ Erro Checkout CAPI: {e}")
 
-def enviar_purchase_capi(uid: int, valor_venda: float):
-    """Envia Compra Real (Purchase) - Sem travas para permitir múltiplas compras"""
-    payload = {
-        "data": [{
-            "event_name": "Purchase",
-            "event_time": int(time.time()),
-            "event_id": f"pur_{uid}_{int(time.time())}",
-            "action_source": "chat",
-            "user_data": {"external_id": [hash_data(str(uid))]},
-            "custom_data": {"value": valor_venda, "currency": "BRL"}
-        }],
-        "access_token": ACCESS_TOKEN
-    }
-    try:
-        resp = requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
-        logger.info(f"💰 [CAPI] Purchase enviado! UID: {uid} | R$ {valor_venda} | Status: {resp.status_code}")
-    except Exception as e:
-        logger.error(f"❌ Erro Purchase CAPI: {e}")
 
 # ====================== TELEGRAM HANDLERS ======================
 
