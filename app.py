@@ -205,22 +205,16 @@ except Exception as e:
 # ====================== FLASK ROUTES ======================
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    logger.info("📥 [WEBHOOK] Requisição recebida do Telegram")
     try:
         data = request.json
-        if not data:
-            logger.warning("⚠️ [WEBHOOK] Body vazio")
-            return "ok", 200
-
         update = Update.de_json(data, application.bot)
-        logger.info(f"🔄 [WEBHOOK] Update recebido - ID: {update.update_id}")
-
-        # Envia o update para ser processado no event loop dedicado do bot de forma segura
+        
+        # O SEGREDO ESTÁ AQUI: Mandar para o loop que está na outra thread
         asyncio.run_coroutine_threadsafe(application.process_update(update), bot_loop)
         
         return "ok", 200
     except Exception as e:
-        logger.error(f"❌ [WEBHOOK] Erro ao processar: {e}", exc_info=True)
+        logger.error(f"❌ Erro no webhook: {e}")
         return "error", 500
 
 
