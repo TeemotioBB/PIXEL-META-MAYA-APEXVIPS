@@ -180,19 +180,27 @@ async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         enviar_initiatecheckout_capi(uid)
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler para caso o usuário DIGITE algo no teclado"""
     uid = update.effective_user.id
-    username = update.effective_user.username or "sem_username"
+    # O 'text' aqui pode vir do usuário OU do próprio bot se o seu código estiver lendo o chat
     text = (update.message.text or "").lower().strip()
 
-    logger.info(f"[TELEGRAM] Mensagem digitada | UID: {uid} | Texto: {text}")
+    logger.info(f"[MONITOR] Mensagem detectada no chat | UID: {uid} | Texto: {text[:50]}...")
 
-    enviar_lead_capi(uid, "user_message")
+    # 1. Gatilho de Lead por interação comum
+    enviar_lead_capi(uid, "chat_interaction")
 
-    payment_keywords = ["pix", "pagar", "pagamento", "valor", "preco", "preço", "comprar"]
-    if any(kw in text for kw in payment_keywords):
+    # 2. LISTA DE GATILHOS DA APEXVIPS (O que aparece na mensagem após o clique)
+    # Se a mensagem contiver esses termos, o cara selecionou um plano!
+    checkout_indicators = [
+        "plano selecionado", 
+        "valor: r$", 
+        "escolha o método de pagamento",
+        "pagar com pix"
+    ]
+
+    if any(indicator in text for indicator in checkout_indicators):
+        logger.info(f"[🔥 CHECKOUT] Mensagem de sistema da ApexVips detectada! Enviando CAPI...")
         enviar_initiatecheckout_capi(uid)
-
 # ====================== EVENT LOOP EM THREAD DEDICADA ======================
 logger.info("Construindo Application do Telegram...")
 application = Application.builder().token(TELEGRAM_TOKEN).build()
