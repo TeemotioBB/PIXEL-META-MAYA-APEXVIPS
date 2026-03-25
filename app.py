@@ -224,14 +224,63 @@ def apex_webhook():
     elif evento == "payment_approved": enviar_purchase_capi(uid, float(val_raw)/100)
     return "ok", 200
 
+# ====================== ROTAS FLASK ======================
+
+@app.route("/", methods=["GET"])
+def home():
+    logger.info("[HOME] Health check acessado")
+    return "ApexVips Bot esta online", 200
+
 @app.route("/set-webhook", methods=["GET"])
 def set_webhook():
-    url = f"{WEBHOOK_BASE_URL.rstrip('/')}/webhook"
+    logger.info("🔗 [SET-WEBHOOK] Iniciando configuração...")
+    webhook_url = WEBHOOK_BASE_URL.rstrip("/") + "/webhook"
     try:
-        async def s(): await application.bot.set_webhook(url)
-        asyncio.run_coroutine_threadsafe(s(), bot_loop).result()
-        return f"✅ Webhook configurado: {url}", 200
-    except Exception as e: return str(e), 500
+        async def setup():
+            await application.bot.delete_webhook(drop_pending_updates=True)
+            await application.bot.set_webhook(webhook_url)
+        
+        asyncio.run(setup())
+        return f"✅ Webhook configurado: {webhook_url}", 200
+    except Exception as e:
+        logger.error(f"❌ Erro no set-webhook: {e}")
+        return f"❌ Erro: {e}", 500
+
+@app.route("/webhook", methods=["POST"])
+def telegram_webhook():
+    """Recebe mensagens do Telegram"""
+    try:
+        data = request.json
+        update = Update.de_json(data, application.bot)
+        asyncio.run_coroutine_threadsafe(application.process_update(update), bot_loop)
+        return "ok", 200
+    except Exception as e:
+        logger.error(f"❌ Erro no webhook Telegram: {e}")
+        return "error", 500
+
+@app.route("/apex-webhook", methods=["POST"])
+def apex_callback():
+    """Recebe avisos de pagamento da ApexVips"""
+    try:
+        data = request.json
+        if not data: return "ok", 200
+
+        evento = data.get("event")
+        uid = data.get("customer", {}).get("chat_id")
+        
+        # Converte centavos para Reais
+        valor_raw = data.get("transaction", {}).get("plan_value", 0)
+        valor_reais = float(valor_raw) / 100
+        plano_nome = data.get("transaction", {}).get("plan_name", "Plano VIP")
+
+        if evento == "payment_approved" and uid:
+            logger.info(f"🔥 [APEX] PAGAMENTO APROVADO! UID: {uid} | R$ {valor_reais}")
+            enviar_purchase_capi(uid, valor_reais, plano_nome)
+        
+        return "ok", 200
+    except Exception as e:
+        logger.error(f"❌ Erro no apex-webhook: {e}")
+        return "error", 500
 
 @app.route("/", methods=["GET"])
 def home(): return "Bot Online", 200
