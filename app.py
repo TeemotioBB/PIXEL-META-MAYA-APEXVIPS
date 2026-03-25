@@ -18,7 +18,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 log.info("=" * 50)
 log.info("🚀 APEX VIPS BOT - Iniciando...")
@@ -190,39 +190,47 @@ except Exception as e:
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    logger.info("📥 Webhook recebido do Telegram")
+    log.info("📥 [WEBHOOK] Requisição recebida")
     try:
         data = request.json
-        if data:
-            update = Update.de_json(data, application.bot)
-            asyncio.create_task(application.process_update(update))
-            logger.info(f"🔄 Update recebido e enviado para processamento - ID: {update.update_id if 'update_id' in str(data) else 'N/A'}")
+        if not data:
+            log.warning("⚠️  [WEBHOOK] Body vazio recebido")
+            return "ok", 200
+
+        log.info(f"📦 [WEBHOOK] Payload: {data}")
+        update = Update.de_json(data, application.bot)
+        log.info(f"🔄 [WEBHOOK] Processando update ID: {update.update_id}")
+
+        loop.run_until_complete(application.process_update(update))
+        log.info(f"✅ [WEBHOOK] Update {update.update_id} processado com sucesso")
         return "ok", 200
     except Exception as e:
-        logger.error(f"❌ Erro no webhook: {e}", exc_info=True)
+        log.error(f"❌ [WEBHOOK] Erro ao processar: {e}", exc_info=True)
         return "error", 500
 
 
 @app.route("/set-webhook", methods=["GET"])
 def set_webhook():
-    logger.info("🔗 Iniciando configuração do webhook...")
+    log.info("🔗 [SET-WEBHOOK] Iniciando configuração do webhook...")
     if not WEBHOOK_BASE_URL:
-        logger.error("❌ WEBHOOK_BASE_URL não configurada")
+        log.error("❌ [SET-WEBHOOK] WEBHOOK_BASE_URL não configurada")
         return "❌ WEBHOOK_BASE_URL não configurada", 400
-   
+
     webhook_url = WEBHOOK_BASE_URL.rstrip("/") + "/webhook"
-    logger.info(f"🔗 URL alvo: {webhook_url}")
-   
+    log.info(f"🔗 [SET-WEBHOOK] URL alvo: {webhook_url}")
+
     try:
         async def setup():
             await application.bot.delete_webhook(drop_pending_updates=True)
+            log.info("🗑️  [SET-WEBHOOK] Webhook anterior deletado")
             await application.bot.set_webhook(webhook_url)
-        asyncio.run(setup())
-        logger.info(f"✅ Webhook definido com sucesso: {webhook_url}")
+            log.info(f"✅ [SET-WEBHOOK] Webhook definido para: {webhook_url}")
+
+        loop.run_until_complete(setup())
         return f"✅ Webhook configurado!<br>URL: {webhook_url}", 200
     except Exception as e:
-        logger.error(f"❌ Erro ao configurar webhook: {e}", exc_info=True)
-        return f"❌ Erro: {e}", 500
+        log.error(f"❌ [SET-WEBHOOK] Erro: {e}", exc_info=True)
+        return f"❌ Erro: {str(e)}", 500
 
 
 @app.route("/", methods=["GET"])
