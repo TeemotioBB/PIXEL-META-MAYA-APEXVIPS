@@ -144,39 +144,59 @@ def enviar_initiatecheckout_capi(uid: int):
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     username = update.effective_user.username or "sem_username"
-    logger.info(f"[TELEGRAM] /start recebido | UID: {uid} | Username: @{username}")
+    logger.info(f"[TELEGRAM] /start recebido | UID: {uid} | @{username}")
+    
+    # Envia Lead (Morno/Warm)
     enviar_lead_capi(uid, "start")
-    logger.info(f"[PROCESSADO] Lead /start capturado e enviado para Meta CAPI")
 
+async def button_click_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Captura cliques nos botões Inline (os botões verdes de preço)"""
+    query = update.callback_query
+    uid = query.from_user.id
+    # O callback_data é o que está 'atrás' do botão
+    callback_data = (query.data or "").lower()
+    
+    # IMPORTANTE: Responde ao Telegram que o clique foi recebido
+    await query.answer()
+
+    # Esse log vai te mostrar exatamente o que a ApexVips usa no botão!
+    logger.info(f"[BOTAO] Clique Inline detectado | UID: {uid} | Data: {callback_data}")
+
+    # Envia um Lead de interação (Mais quente que o start)
+    enviar_lead_capi(uid, "button_click")
+
+    # Identificadores comuns de botões de checkout
+    # Se o botão tiver qualquer um desses termos, enviamos o InitiateCheckout
+    payment_identifiers = ["plan", "buy", "pix", "pay", "assin", "checkout", "p_", "v_"]
+    
+    if any(idf in callback_data for idf in payment_identifiers):
+        logger.info(f"[INTENT] Intenção de compra no botão detectada! Data: {callback_data}")
+        enviar_initiatecheckout_capi(uid)
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler para caso o usuário DIGITE algo no teclado"""
     uid = update.effective_user.id
     username = update.effective_user.username or "sem_username"
     text = (update.message.text or "").lower().strip()
 
-    logger.info(f"[TELEGRAM] Mensagem recebida | UID: {uid} | Username: @{username} | Texto: {text}")
+    logger.info(f"[TELEGRAM] Mensagem digitada | UID: {uid} | Texto: {text}")
 
     enviar_lead_capi(uid, "user_message")
 
-    payment_keywords = ["pix", "pagar", "pagamento", "qr", "como pago", "valor", "preco"]
-    matched = [kw for kw in payment_keywords if kw in text]
-
-    if matched:
-        logger.info(f"[INTENT] Intencao de pagamento detectada | UID: {uid} | Keywords: {matched}")
-        enviar_lead_capi(uid, "payment_intent")
+    payment_keywords = ["pix", "pagar", "pagamento", "valor", "preco", "preço", "comprar"]
+    if any(kw in text for kw in payment_keywords):
         enviar_initiatecheckout_capi(uid)
-        logger.info(f"[PROCESSADO] InitiateCheckout enviado para Meta CAPI | UID: {uid}")
-    else:
-        logger.info(f"[INTENT] Mensagem comum, sem intencao de pagamento | UID: {uid}")
-
 
 # ====================== EVENT LOOP EM THREAD DEDICADA ======================
 logger.info("Construindo Application do Telegram...")
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 
+# REGISTRO DOS HANDLERS (A ordem CallbackQueryHandler é essencial aqui)
 application.add_handler(CommandHandler("start", start_handler))
+application.add_handler(CallbackQueryHandler(button_click_handler))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-logger.info("Handlers registrados: /start + mensagens de texto")
+
+logger.info("Handlers registrados: /start + Cliques de Botão + Mensagens")
 
 # Cria um loop dedicado que roda em thread separada
 bot_loop = asyncio.new_event_loop()
@@ -192,13 +212,14 @@ logger.info("Thread do event loop iniciada")
 # Inicializa o Application dentro do loop dedicado
 logger.info("Inicializando Application do Telegram...")
 try:
+    # Usando run_coroutine_threadsafe para garantir compatibilidade com o Gunicorn
     future = asyncio.run_coroutine_threadsafe(application.initialize(), bot_loop)
     future.result(timeout=30)
     future = asyncio.run_coroutine_threadsafe(application.start(), bot_loop)
     future.result(timeout=30)
     logger.info("Application do Telegram inicializada e startada com sucesso!")
 except Exception as e:
-    log.error(f"Falha ao inicializar Application do Telegram: {e}")
+    logger.error(f"Falha ao inicializar Application do Telegram: {e}")
     raise
 
 
