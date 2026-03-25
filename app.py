@@ -7,6 +7,8 @@ import os
 import logging
 import hashlib
 import time
+import asyncio
+import threading
 import requests
 from datetime import date
 from flask import Flask, request
@@ -166,7 +168,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.info(f"📨 [INTENT] Mensagem comum, sem intenção de pagamento | UID: {uid}")
 
 
-# ====================== FLASK ROUTES ======================
+# ====================== EVENT LOOP EM THREAD DEDICADA ======================
+# Solução para Gunicorn multi-worker: loop roda em thread própria,
+# acessível por TODOS os workers via variável global.
+
 log.info("🔧 Construindo Application do Telegram...")
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -174,20 +179,31 @@ application.add_handler(CommandHandler("start", start_handler))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 log.info("✅ Handlers registrados: /start + mensagens de texto")
 
-import asyncio
+# Cria um loop dedicado que roda em thread separada
+bot_loop = asyncio.new_event_loop()
 
+def start_bot_loop(loop: asyncio.AbstractEventLoop):
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+bot_thread = threading.Thread(target=start_bot_loop, args=(bot_loop,), daemon=True)
+bot_thread.start()
+log.info("✅ Thread do event loop iniciada")
+
+# Inicializa o Application dentro do loop dedicado (blocking até terminar)
 log.info("⚙️  Inicializando Application do Telegram (initialize + start)...")
 try:
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(application.initialize())
-    loop.run_until_complete(application.start())
+    future = asyncio.run_coroutine_threadsafe(application.initialize(), bot_loop)
+    future.result(timeout=30)
+    future = asyncio.run_coroutine_threadsafe(application.start(), bot_loop)
+    future.result(timeout=30)
     log.info("✅ Application do Telegram inicializada e startada com sucesso!")
 except Exception as e:
     log.error(f"❌ Falha ao inicializar Application do Telegram: {e}")
     raise
 
 
+# ====================== FLASK ROUTES ======================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     log.info("📥 [WEBHOOK] Requisição recebida")
@@ -197,11 +213,17 @@ def webhook():
             log.warning("⚠️  [WEBHOOK] Body vazio recebido")
             return "ok", 200
 
-        log.info(f"📦 [WEBHOOK] Payload: {data}")
+        log.info(f"📦 [WEBHOOK] Payload recebido | update_id: {data.get('update_id', 'N/A')}")
         update = Update.de_json(data, application.bot)
         log.info(f"🔄 [WEBHOOK] Processando update ID: {update.update_id}")
 
-        loop.run_until_complete(application.process_update(update))
+        # Submete o update ao loop dedicado e aguarda conclusão
+        future = asyncio.run_coroutine_threadsafe(
+            application.process_update(update),
+            bot_loop
+        )
+        future.result(timeout=30)  # aguarda o handler terminar
+
         log.info(f"✅ [WEBHOOK] Update {update.update_id} processado com sucesso")
         return "ok", 200
     except Exception as e:
@@ -226,7 +248,8 @@ def set_webhook():
             await application.bot.set_webhook(webhook_url)
             log.info(f"✅ [SET-WEBHOOK] Webhook definido para: {webhook_url}")
 
-        loop.run_until_complete(setup())
+        future = asyncio.run_coroutine_threadsafe(setup(), bot_loop)
+        future.result(timeout=30)
         return f"✅ Webhook configurado!<br>URL: {webhook_url}", 200
     except Exception as e:
         log.error(f"❌ [SET-WEBHOOK] Erro: {e}", exc_info=True)
@@ -243,4 +266,4 @@ def home():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
     log.info(f"🌐 Subindo Flask na porta {port}")
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0
