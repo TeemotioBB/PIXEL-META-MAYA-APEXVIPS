@@ -13,8 +13,14 @@ import requests
 from datetime import date
 from flask import Flask, request
 from telegram import Update
-from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
-
+from telegram.ext import (
+    Application, 
+    MessageHandler, 
+    CommandHandler, 
+    CallbackQueryHandler, 
+    filters, 
+    ContextTypes
+)
 # ====================== LOGGING ======================
 logging.basicConfig(
     level=logging.INFO,
