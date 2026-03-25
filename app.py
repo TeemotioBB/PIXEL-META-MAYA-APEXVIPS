@@ -215,8 +215,8 @@ def webhook():
         update = Update.de_json(data, application.bot)
         logger.info(f"🔄 [WEBHOOK] Update recebido - ID: {update.update_id}")
 
-        # Processa de forma assíncrona
-        asyncio.create_task(application.process_update(update))
+        # Envia o update para ser processado no event loop dedicado do bot de forma segura
+        asyncio.run_coroutine_threadsafe(application.process_update(update), bot_loop)
         
         return "ok", 200
     except Exception as e:
