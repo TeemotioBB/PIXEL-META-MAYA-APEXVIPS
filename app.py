@@ -151,24 +151,41 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "pagar com pix" in text or "plano selecionado" in text:
         enviar_initiatecheckout_capi(uid)
 
-# ====================== BOT ENGINE & THREADING ======================
+# ====================== BOT ENGINE & THREADING (VERSÃO CORRIGIDA) ======================
 
+# 1. Criamos a aplicação
 application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+# 2. Registramos os handlers
 application.add_handler(CommandHandler("start", start_handler))
 application.add_handler(CallbackQueryHandler(button_click_handler))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
+# 3. Gerenciamento do Loop de forma robusta
 bot_loop = asyncio.new_event_loop()
 
 def start_bot_loop(loop):
     asyncio.set_event_loop(loop)
-    loop.run_forever()
+    try:
+        loop.run_forever()
+    except Exception as e:
+        logger.error(f"Erro no loop do bot: {e}")
+    finally:
+        loop.close()
 
-threading.Thread(target=start_bot_loop, args=(bot_loop,), daemon=True).start()
+# Iniciamos a thread
+thread = threading.Thread(target=start_bot_loop, args=(bot_loop,), daemon=True)
+thread.start()
 
-# Inicialização assíncrona do Bot
-asyncio.run_coroutine_threadsafe(application.initialize(), bot_loop).result()
-asyncio.run_coroutine_threadsafe(application.start(), bot_loop).result()
+# 4. Inicializamos o Bot SEM fechar o loop
+def setup_bot():
+    future = asyncio.run_coroutine_threadsafe(application.initialize(), bot_loop)
+    future.result() # Espera inicializar
+    future = asyncio.run_coroutine_threadsafe(application.start(), bot_loop)
+    future.result() # Espera startar
+    logger.info("✅ Application do Telegram rodando em thread dedicada!")
+
+setup_bot()
 
 # ====================== FLASK ROUTES ======================
 
