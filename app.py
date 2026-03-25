@@ -13,25 +13,62 @@ from flask import Flask, request
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
+# ====================== LOGGING ======================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+log = logging.getLogger(__name__)
+
+log.info("=" * 50)
+log.info("🚀 APEX VIPS BOT - Iniciando...")
+log.info("=" * 50)
+
+# ====================== ENV VARS CHECK ======================
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN_APEX")
+REDIS_URL = os.getenv("REDIS_URL")
+WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL")
+
+log.info(f"🔑 TELEGRAM_TOKEN_APEX: {'✅ Definida' if TELEGRAM_TOKEN else '❌ NÃO DEFINIDA'}")
+log.info(f"🔑 REDIS_URL: {'✅ Definida' if REDIS_URL else '❌ NÃO DEFINIDA'}")
+log.info(f"🔑 WEBHOOK_BASE_URL: {'✅ Definida' if WEBHOOK_BASE_URL else '❌ NÃO DEFINIDA'}")
+
 # ====================== META CAPI ======================
 PIXEL_ID = "735253462874774"
 ACCESS_TOKEN = "EAANRM9QJv7YBRG54vW9VkOT3rgEQDry9PA2UzN7HsdauowZBDKZB0e1MtvZBvUuUSc9Ub2I96psCQTl0PZBRoIG7ElDCyMU7uO2idnf0nrebj4u3f7ZA396AGXCrBZC4NljW8OURxBu4qi5zGFZBEaWVtqlfwdZCoqGFeJ238YqE86c2tfwjdjBBJ52xLX3xZCh1sqwZDZD"
+
+log.info(f"📡 META CAPI - Pixel ID: {PIXEL_ID}")
 
 def hash_data(value: str) -> str:
     return hashlib.sha256(value.strip().lower().encode("utf-8")).hexdigest()
 
 # ====================== REDIS ======================
 import redis
-r = redis.from_url(os.getenv("REDIS_URL"), decode_responses=True)
+
+log.info("🔌 Conectando ao Redis...")
+try:
+    r = redis.from_url(REDIS_URL, decode_responses=True)
+    r.ping()
+    log.info("✅ Redis conectado com sucesso!")
+except Exception as e:
+    log.error(f"❌ Falha ao conectar no Redis: {e}")
+    raise
 
 # ====================== FLASK ======================
 app = Flask(__name__)
+log.info("✅ Flask inicializado")
 
 # ====================== CAPI FUNCTIONS ======================
 def enviar_lead_capi(uid: int, trigger: str):
-    if r.exists(f"lead_sent:{uid}:{date.today()}"):
+    redis_key = f"lead_sent:{uid}:{date.today()}"
+    log.info(f"📊 [CAPI] Tentando enviar Lead | UID: {uid} | Trigger: {trigger}")
+
+    if r.exists(redis_key):
+        log.info(f"⏭️  [CAPI] Lead já enviado hoje para UID: {uid} — pulando")
         return
-    r.set(f"lead_sent:{uid}:{date.today()}", "1", ex=86400)
+
+    r.set(redis_key, "1", ex=86400)
+    log.info(f"💾 [REDIS] Chave salva: {redis_key}")
 
     payload = {
         "data": [{
@@ -57,14 +94,21 @@ def enviar_lead_capi(uid: int, trigger: str):
         "access_token": ACCESS_TOKEN
     }
 
+    log.info(f"📤 [CAPI] Enviando evento Lead para Meta | UID: {uid}")
     try:
-        requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=15)
-        logging.info(f"✅ LEAD SUPER_HOT → UID: {uid} | Trigger: {trigger}")
+        resp = requests.post(
+            f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events",
+            json=payload,
+            timeout=15
+        )
+        log.info(f"✅ [CAPI] Lead enviado | UID: {uid} | Trigger: {trigger} | Status HTTP: {resp.status_code} | Resposta: {resp.text}")
     except Exception as e:
-        logging.error(f"Lead erro: {e}")
+        log.error(f"❌ [CAPI] Erro ao enviar Lead | UID: {uid} | Erro: {e}")
 
 
 def enviar_initiatecheckout_capi(uid: int):
+    log.info(f"🛒 [CAPI] Enviando InitiateCheckout | UID: {uid}")
+
     payload = {
         "data": [{
             "event_name": "InitiateCheckout",
@@ -82,74 +126,121 @@ def enviar_initiatecheckout_capi(uid: int):
         }],
         "access_token": ACCESS_TOKEN
     }
+
     try:
-        requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=15)
-        logging.info(f"✅ INITIATECHECKOUT → UID: {uid}")
+        resp = requests.post(
+            f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events",
+            json=payload,
+            timeout=15
+        )
+        log.info(f"✅ [CAPI] InitiateCheckout enviado | UID: {uid} | Status HTTP: {resp.status_code} | Resposta: {resp.text}")
     except Exception as e:
-        logging.error(f"InitiateCheckout erro: {e}")
+        log.error(f"❌ [CAPI] Erro ao enviar InitiateCheckout | UID: {uid} | Erro: {e}")
 
 
 # ====================== HANDLERS ======================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    logging.info(f"🚀 /start ApexVips: {uid}")
+    username = update.effective_user.username or "sem_username"
+    log.info(f"▶️  [TELEGRAM] /start recebido | UID: {uid} | Username: @{username}")
     enviar_lead_capi(uid, "start")
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+    username = update.effective_user.username or "sem_username"
     text = (update.message.text or "").lower().strip()
+
+    log.info(f"💬 [TELEGRAM] Mensagem recebida | UID: {uid} | Username: @{username} | Texto: '{text}'")
 
     enviar_lead_capi(uid, "user_message")
 
-    if any(kw in text for kw in ["pix", "pagar", "pagamento", "qr", "como pago", "valor", "preço", "preco"]):
+    payment_keywords = ["pix", "pagar", "pagamento", "qr", "como pago", "valor", "preço", "preco"]
+    matched = [kw for kw in payment_keywords if kw in text]
+
+    if matched:
+        log.info(f"💰 [INTENT] Intenção de pagamento detectada | UID: {uid} | Keywords: {matched}")
         enviar_lead_capi(uid, "payment_intent")
         enviar_initiatecheckout_capi(uid)
+    else:
+        log.info(f"📨 [INTENT] Mensagem comum, sem intenção de pagamento | UID: {uid}")
 
 
 # ====================== FLASK ROUTES ======================
-application = Application.builder().token(os.getenv("TELEGRAM_TOKEN_APEX")).build()
+log.info("🔧 Construindo Application do Telegram...")
+application = Application.builder().token(TELEGRAM_TOKEN).build()
 
 application.add_handler(CommandHandler("start", start_handler))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+log.info("✅ Handlers registrados: /start + mensagens de texto")
+
+import asyncio
+
+log.info("⚙️  Inicializando Application do Telegram (initialize + start)...")
+try:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(application.initialize())
+    loop.run_until_complete(application.start())
+    log.info("✅ Application do Telegram inicializada e startada com sucesso!")
+except Exception as e:
+    log.error(f"❌ Falha ao inicializar Application do Telegram: {e}")
+    raise
+
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    log.info("📥 [WEBHOOK] Requisição recebida")
     try:
         data = request.json
-        if data:
-            update = Update.de_json(data, application.bot)
-            application.update_queue.put(update)
+        if not data:
+            log.warning("⚠️  [WEBHOOK] Body vazio recebido")
+            return "ok", 200
+
+        log.info(f"📦 [WEBHOOK] Payload: {data}")
+        update = Update.de_json(data, application.bot)
+        log.info(f"🔄 [WEBHOOK] Processando update ID: {update.update_id}")
+
+        loop.run_until_complete(application.process_update(update))
+        log.info(f"✅ [WEBHOOK] Update {update.update_id} processado com sucesso")
         return "ok", 200
     except Exception as e:
-        logging.error(f"Webhook erro: {e}")
+        log.error(f"❌ [WEBHOOK] Erro ao processar: {e}", exc_info=True)
         return "error", 500
+
 
 @app.route("/set-webhook", methods=["GET"])
 def set_webhook():
-    base_url = os.getenv("WEBHOOK_BASE_URL")
-    if not base_url:
+    log.info("🔗 [SET-WEBHOOK] Iniciando configuração do webhook...")
+    if not WEBHOOK_BASE_URL:
+        log.error("❌ [SET-WEBHOOK] WEBHOOK_BASE_URL não configurada")
         return "❌ WEBHOOK_BASE_URL não configurada", 400
-    
-    webhook_url = base_url.rstrip("/") + "/webhook"
+
+    webhook_url = WEBHOOK_BASE_URL.rstrip("/") + "/webhook"
+    log.info(f"🔗 [SET-WEBHOOK] URL alvo: {webhook_url}")
+
     try:
         async def setup():
             await application.bot.delete_webhook(drop_pending_updates=True)
+            log.info("🗑️  [SET-WEBHOOK] Webhook anterior deletado")
             await application.bot.set_webhook(webhook_url)
-        import asyncio
-        asyncio.run(setup())
+            log.info(f"✅ [SET-WEBHOOK] Webhook definido para: {webhook_url}")
+
+        loop.run_until_complete(setup())
         return f"✅ Webhook configurado!<br>URL: {webhook_url}", 200
     except Exception as e:
+        log.error(f"❌ [SET-WEBHOOK] Erro: {e}", exc_info=True)
         return f"❌ Erro: {str(e)}", 500
+
 
 @app.route("/", methods=["GET"])
 def home():
+    log.info("🏠 [HOME] Health check acessado")
     return "ApexVips Bot está online ✅", 200
 
 
 # ====================== START ======================
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    logging.info("🚀 ApexVips Bot iniciado - CAPI otimizado")
     port = int(os.getenv("PORT", 8080))
+    log.info(f"🌐 Subindo Flask na porta {port}")
     app.run(host="0.0.0.0", port=port)
