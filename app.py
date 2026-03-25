@@ -22,24 +22,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-log.info("=" * 50)
-log.info("APEX VIPS BOT - Iniciando...")
-log.info("=" * 50)
+logger.info("=" * 50)
+logger.info("🚀 APEX VIPS BOT - Iniciando...")
+logger.info("=" * 50)
 
 # ====================== ENV VARS CHECK ======================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN_APEX")
 REDIS_URL = os.getenv("REDIS_URL")
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL")
 
-log.info(f"TELEGRAM_TOKEN_APEX: {'Definida' if TELEGRAM_TOKEN else 'NAO DEFINIDA'}")
-log.info(f"REDIS_URL: {'Definida' if REDIS_URL else 'NAO DEFINIDA'}")
-log.info(f"WEBHOOK_BASE_URL: {'Definida' if WEBHOOK_BASE_URL else 'NAO DEFINIDA'}")
+logger.info(f"TELEGRAM_TOKEN_APEX: {'Definida' if TELEGRAM_TOKEN else 'NAO DEFINIDA'}")
+logger.info(f"REDIS_URL: {'Definida' if REDIS_URL else 'NAO DEFINIDA'}")
+logger.info(f"WEBHOOK_BASE_URL: {'Definida' if WEBHOOK_BASE_URL else 'NAO DEFINIDA'}")
 
 # ====================== META CAPI ======================
 PIXEL_ID = "735253462874774"
 ACCESS_TOKEN = "EAANRM9QJv7YBRG54vW9VkOT3rgEQDry9PA2UzN7HsdauowZBDKZB0e1MtvZBvUuUSc9Ub2I96psCQTl0PZBRoIG7ElDCyMU7uO2idnf0nrebj4u3f7ZA396AGXCrBZC4NljW8OURxBu4qi5zGFZBEaWVtqlfwdZCoqGFeJ238YqE86c2tfwjdjBBJ52xLX3xZCh1sqwZDZD"
 
-log.info(f"META CAPI - Pixel ID: {PIXEL_ID}")
+logger.info(f"META CAPI - Pixel ID: {PIXEL_ID}")
 
 def hash_data(value: str) -> str:
     return hashlib.sha256(value.strip().lower().encode("utf-8")).hexdigest()
@@ -47,30 +47,30 @@ def hash_data(value: str) -> str:
 # ====================== REDIS ======================
 import redis
 
-log.info("Conectando ao Redis...")
+logger.info("Conectando ao Redis...")
 try:
     r = redis.from_url(REDIS_URL, decode_responses=True)
     r.ping()
-    log.info("Redis conectado com sucesso!")
+    logger.info("Redis conectado com sucesso!")
 except Exception as e:
     log.error(f"Falha ao conectar no Redis: {e}")
     raise
 
 # ====================== FLASK ======================
 app = Flask(__name__)
-log.info("Flask inicializado")
+logger.info("Flask inicializado")
 
 # ====================== CAPI FUNCTIONS ======================
 def enviar_lead_capi(uid: int, trigger: str):
     redis_key = f"lead_sent:{uid}:{date.today()}"
-    log.info(f"[CAPI] Tentando enviar Lead | UID: {uid} | Trigger: {trigger}")
+    logger.info(f"[CAPI] Tentando enviar Lead | UID: {uid} | Trigger: {trigger}")
 
     if r.exists(redis_key):
-        log.info(f"[CAPI] Lead ja enviado hoje para UID: {uid} — pulando")
+        logger.info(f"[CAPI] Lead ja enviado hoje para UID: {uid} — pulando")
         return
 
     r.set(redis_key, "1", ex=86400)
-    log.info(f"[REDIS] Chave salva: {redis_key}")
+    logger.info(f"[REDIS] Chave salva: {redis_key}")
 
     payload = {
         "data": [{
@@ -96,20 +96,20 @@ def enviar_lead_capi(uid: int, trigger: str):
         "access_token": ACCESS_TOKEN
     }
 
-    log.info(f"[CAPI] Enviando evento Lead para Meta | UID: {uid}")
+    logger.info(f"[CAPI] Enviando evento Lead para Meta | UID: {uid}")
     try:
         resp = requests.post(
             f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events",
             json=payload,
             timeout=15
         )
-        log.info(f"[CAPI] Lead enviado | UID: {uid} | Trigger: {trigger} | Status: {resp.status_code}")
+        logger.info(f"[CAPI] Lead enviado | UID: {uid} | Trigger: {trigger} | Status: {resp.status_code}")
     except Exception as e:
         log.error(f"[CAPI] Erro ao enviar Lead | UID: {uid} | Erro: {e}")
 
 
 def enviar_initiatecheckout_capi(uid: int):
-    log.info(f"[CAPI] Enviando InitiateCheckout | UID: {uid}")
+    logger.info(f"[CAPI] Enviando InitiateCheckout | UID: {uid}")
 
     payload = {
         "data": [{
@@ -135,7 +135,7 @@ def enviar_initiatecheckout_capi(uid: int):
             json=payload,
             timeout=15
         )
-        log.info(f"[CAPI] InitiateCheckout enviado | UID: {uid} | Status: {resp.status_code}")
+        logger.info(f"[CAPI] InitiateCheckout enviado | UID: {uid} | Status: {resp.status_code}")
     except Exception as e:
         log.error(f"[CAPI] Erro ao enviar InitiateCheckout | UID: {uid} | Erro: {e}")
 
@@ -144,9 +144,9 @@ def enviar_initiatecheckout_capi(uid: int):
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     username = update.effective_user.username or "sem_username"
-    log.info(f"[TELEGRAM] /start recebido | UID: {uid} | Username: @{username}")
+    logger.info(f"[TELEGRAM] /start recebido | UID: {uid} | Username: @{username}")
     enviar_lead_capi(uid, "start")
-    log.info(f"[PROCESSADO] Lead /start capturado e enviado para Meta CAPI")
+    logger.info(f"[PROCESSADO] Lead /start capturado e enviado para Meta CAPI")
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -154,7 +154,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = update.effective_user.username or "sem_username"
     text = (update.message.text or "").lower().strip()
 
-    log.info(f"[TELEGRAM] Mensagem recebida | UID: {uid} | Username: @{username} | Texto: {text}")
+    logger.info(f"[TELEGRAM] Mensagem recebida | UID: {uid} | Username: @{username} | Texto: {text}")
 
     enviar_lead_capi(uid, "user_message")
 
@@ -162,21 +162,21 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     matched = [kw for kw in payment_keywords if kw in text]
 
     if matched:
-        log.info(f"[INTENT] Intencao de pagamento detectada | UID: {uid} | Keywords: {matched}")
+        logger.info(f"[INTENT] Intencao de pagamento detectada | UID: {uid} | Keywords: {matched}")
         enviar_lead_capi(uid, "payment_intent")
         enviar_initiatecheckout_capi(uid)
-        log.info(f"[PROCESSADO] InitiateCheckout enviado para Meta CAPI | UID: {uid}")
+        logger.info(f"[PROCESSADO] InitiateCheckout enviado para Meta CAPI | UID: {uid}")
     else:
-        log.info(f"[INTENT] Mensagem comum, sem intencao de pagamento | UID: {uid}")
+        logger.info(f"[INTENT] Mensagem comum, sem intencao de pagamento | UID: {uid}")
 
 
 # ====================== EVENT LOOP EM THREAD DEDICADA ======================
-log.info("Construindo Application do Telegram...")
+logger.info("Construindo Application do Telegram...")
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 
 application.add_handler(CommandHandler("start", start_handler))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-log.info("Handlers registrados: /start + mensagens de texto")
+logger.info("Handlers registrados: /start + mensagens de texto")
 
 # Cria um loop dedicado que roda em thread separada
 bot_loop = asyncio.new_event_loop()
@@ -187,16 +187,16 @@ def start_bot_loop(loop: asyncio.AbstractEventLoop):
 
 bot_thread = threading.Thread(target=start_bot_loop, args=(bot_loop,), daemon=True)
 bot_thread.start()
-log.info("Thread do event loop iniciada")
+logger.info("Thread do event loop iniciada")
 
 # Inicializa o Application dentro do loop dedicado
-log.info("Inicializando Application do Telegram...")
+logger.info("Inicializando Application do Telegram...")
 try:
     future = asyncio.run_coroutine_threadsafe(application.initialize(), bot_loop)
     future.result(timeout=30)
     future = asyncio.run_coroutine_threadsafe(application.start(), bot_loop)
     future.result(timeout=30)
-    log.info("Application do Telegram inicializada e startada com sucesso!")
+    logger.info("Application do Telegram inicializada e startada com sucesso!")
 except Exception as e:
     log.error(f"Falha ao inicializar Application do Telegram: {e}")
     raise
@@ -205,16 +205,16 @@ except Exception as e:
 # ====================== FLASK ROUTES ======================
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    log.info("[WEBHOOK] Requisicao recebida")
+    logger.info("[WEBHOOK] Requisicao recebida")
     try:
         data = request.json
         if not data:
             log.warning("[WEBHOOK] Body vazio recebido")
             return "ok", 200
 
-        log.info(f"[WEBHOOK] Payload recebido | update_id: {data.get('update_id', 'N/A')}")
+        logger.info(f"[WEBHOOK] Payload recebido | update_id: {data.get('update_id', 'N/A')}")
         update = Update.de_json(data, application.bot)
-        log.info(f"[WEBHOOK] Processando update ID: {update.update_id}")
+        logger.info(f"[WEBHOOK] Processando update ID: {update.update_id}")
 
         future = asyncio.run_coroutine_threadsafe(
             application.process_update(update),
@@ -222,7 +222,7 @@ def webhook():
         )
         future.result(timeout=30)
 
-        log.info(f"[WEBHOOK] Update {update.update_id} processado com sucesso")
+        logger.info(f"[WEBHOOK] Update {update.update_id} processado com sucesso")
         return "ok", 200
     except Exception as e:
         log.error(f"[WEBHOOK] Erro ao processar: {e}", exc_info=True)
@@ -231,20 +231,20 @@ def webhook():
 
 @app.route("/set-webhook", methods=["GET"])
 def set_webhook():
-    log.info("[SET-WEBHOOK] Iniciando configuracao do webhook...")
+    logger.info("[SET-WEBHOOK] Iniciando configuracao do webhook...")
     if not WEBHOOK_BASE_URL:
         log.error("[SET-WEBHOOK] WEBHOOK_BASE_URL nao configurada")
         return "WEBHOOK_BASE_URL nao configurada", 400
 
     webhook_url = WEBHOOK_BASE_URL.rstrip("/") + "/webhook"
-    log.info(f"[SET-WEBHOOK] URL alvo: {webhook_url}")
+    logger.info(f"[SET-WEBHOOK] URL alvo: {webhook_url}")
 
     try:
         async def setup():
             await application.bot.delete_webhook(drop_pending_updates=True)
-            log.info("[SET-WEBHOOK] Webhook anterior deletado")
+            logger.info("[SET-WEBHOOK] Webhook anterior deletado")
             await application.bot.set_webhook(webhook_url)
-            log.info(f"[SET-WEBHOOK] Webhook definido para: {webhook_url}")
+            logger.info(f"[SET-WEBHOOK] Webhook definido para: {webhook_url}")
 
         future = asyncio.run_coroutine_threadsafe(setup(), bot_loop)
         future.result(timeout=30)
@@ -256,12 +256,12 @@ def set_webhook():
 
 @app.route("/", methods=["GET"])
 def home():
-    log.info("[HOME] Health check acessado")
+    logger.info("[HOME] Health check acessado")
     return "ApexVips Bot esta online", 200
 
 
 # ====================== START ======================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
-    log.info(f"Subindo Flask na porta {port}")
+    logger.info(f"Subindo Flask na porta {port}")
     app.run(host="0.0.0.0", port=port)
