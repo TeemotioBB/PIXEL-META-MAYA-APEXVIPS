@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-“””
-APEX VIPS BOT - META CAPI MAX POWER (Versão Limpa e Otimizada)
-“””
+"""
+APEX VIPS BOT - META CAPI MAX POWER
+"""
 
 import os
 import logging
@@ -16,271 +16,252 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
 # ====================== LOGGING ======================
-
 logging.basicConfig(
-level=logging.INFO,
-format=’%(asctime)s - %(levelname)s - %(message)s’
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
-log = logging.getLogger(**name**)
+log = logging.getLogger(__name__)
 
-log.info(”=” * 50)
-log.info(“🚀 APEX VIPS BOT - Iniciando…”)
-log.info(”=” * 50)
+log.info("=" * 50)
+log.info("APEX VIPS BOT - Iniciando...")
+log.info("=" * 50)
 
 # ====================== ENV VARS CHECK ======================
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN_APEX")
+REDIS_URL = os.getenv("REDIS_URL")
+WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL")
 
-TELEGRAM_TOKEN = os.getenv(“TELEGRAM_TOKEN_APEX”)
-REDIS_URL = os.getenv(“REDIS_URL”)
-WEBHOOK_BASE_URL = os.getenv(“WEBHOOK_BASE_URL”)
-
-log.info(f”🔑 TELEGRAM_TOKEN_APEX: {‘✅ Definida’ if TELEGRAM_TOKEN else ‘❌ NÃO DEFINIDA’}”)
-log.info(f”🔑 REDIS_URL: {‘✅ Definida’ if REDIS_URL else ‘❌ NÃO DEFINIDA’}”)
-log.info(f”🔑 WEBHOOK_BASE_URL: {‘✅ Definida’ if WEBHOOK_BASE_URL else ‘❌ NÃO DEFINIDA’}”)
+log.info(f"TELEGRAM_TOKEN_APEX: {'Definida' if TELEGRAM_TOKEN else 'NAO DEFINIDA'}")
+log.info(f"REDIS_URL: {'Definida' if REDIS_URL else 'NAO DEFINIDA'}")
+log.info(f"WEBHOOK_BASE_URL: {'Definida' if WEBHOOK_BASE_URL else 'NAO DEFINIDA'}")
 
 # ====================== META CAPI ======================
+PIXEL_ID = "735253462874774"
+ACCESS_TOKEN = "EAANRM9QJv7YBRG54vW9VkOT3rgEQDry9PA2UzN7HsdauowZBDKZB0e1MtvZBvUuUSc9Ub2I96psCQTl0PZBRoIG7ElDCyMU7uO2idnf0nrebj4u3f7ZA396AGXCrBZC4NljW8OURxBu4qi5zGFZBEaWVtqlfwdZCoqGFeJ238YqE86c2tfwjdjBBJ52xLX3xZCh1sqwZDZD"
 
-PIXEL_ID = “735253462874774”
-ACCESS_TOKEN = “EAANRM9QJv7YBRG54vW9VkOT3rgEQDry9PA2UzN7HsdauowZBDKZB0e1MtvZBvUuUSc9Ub2I96psCQTl0PZBRoIG7ElDCyMU7uO2idnf0nrebj4u3f7ZA396AGXCrBZC4NljW8OURxBu4qi5zGFZBEaWVtqlfwdZCoqGFeJ238YqE86c2tfwjdjBBJ52xLX3xZCh1sqwZDZD”
-
-log.info(f”📡 META CAPI - Pixel ID: {PIXEL_ID}”)
+log.info(f"META CAPI - Pixel ID: {PIXEL_ID}")
 
 def hash_data(value: str) -> str:
-return hashlib.sha256(value.strip().lower().encode(“utf-8”)).hexdigest()
+    return hashlib.sha256(value.strip().lower().encode("utf-8")).hexdigest()
 
 # ====================== REDIS ======================
-
 import redis
 
-log.info(“🔌 Conectando ao Redis…”)
+log.info("Conectando ao Redis...")
 try:
-r = redis.from_url(REDIS_URL, decode_responses=True)
-r.ping()
-log.info(“✅ Redis conectado com sucesso!”)
+    r = redis.from_url(REDIS_URL, decode_responses=True)
+    r.ping()
+    log.info("Redis conectado com sucesso!")
 except Exception as e:
-log.error(f”❌ Falha ao conectar no Redis: {e}”)
-raise
+    log.error(f"Falha ao conectar no Redis: {e}")
+    raise
 
 # ====================== FLASK ======================
-
-app = Flask(**name**)
-log.info(“✅ Flask inicializado”)
+app = Flask(__name__)
+log.info("Flask inicializado")
 
 # ====================== CAPI FUNCTIONS ======================
-
 def enviar_lead_capi(uid: int, trigger: str):
-redis_key = f”lead_sent:{uid}:{date.today()}”
-log.info(f”📊 [CAPI] Tentando enviar Lead | UID: {uid} | Trigger: {trigger}”)
+    redis_key = f"lead_sent:{uid}:{date.today()}"
+    log.info(f"[CAPI] Tentando enviar Lead | UID: {uid} | Trigger: {trigger}")
 
-```
-if r.exists(redis_key):
-    log.info(f"⏭️  [CAPI] Lead já enviado hoje para UID: {uid} — pulando")
-    return
+    if r.exists(redis_key):
+        log.info(f"[CAPI] Lead ja enviado hoje para UID: {uid} — pulando")
+        return
 
-r.set(redis_key, "1", ex=86400)
-log.info(f"💾 [REDIS] Chave salva: {redis_key}")
+    r.set(redis_key, "1", ex=86400)
+    log.info(f"[REDIS] Chave salva: {redis_key}")
 
-payload = {
-    "data": [{
-        "event_name": "Lead",
-        "event_time": int(time.time()),
-        "event_id": f"lead_{uid}_{date.today()}",
-        "action_source": "chat",
-        "user_data": {"external_id": [hash_data(str(uid))]},
-        "custom_data": {
-            "lead_score": 98,
-            "lead_level": "SUPER_HOT",
-            "intent_type": "vip_purchase_intent",
-            "funnel_phase": "bottom_funnel",
-            "trigger": trigger,
-            "content_category": "adult_content",
-            "niche": "hot_adult_vip",
-            "product_type": "digital_subscription",
-            "subscription_duration": "lifetime",
-            "predicted_ltv": 97.50,
-            "bot_type": "apex_vips"
-        }
-    }],
-    "access_token": ACCESS_TOKEN
-}
+    payload = {
+        "data": [{
+            "event_name": "Lead",
+            "event_time": int(time.time()),
+            "event_id": f"lead_{uid}_{date.today()}",
+            "action_source": "chat",
+            "user_data": {"external_id": [hash_data(str(uid))]},
+            "custom_data": {
+                "lead_score": 98,
+                "lead_level": "SUPER_HOT",
+                "intent_type": "vip_purchase_intent",
+                "funnel_phase": "bottom_funnel",
+                "trigger": trigger,
+                "content_category": "adult_content",
+                "niche": "hot_adult_vip",
+                "product_type": "digital_subscription",
+                "subscription_duration": "lifetime",
+                "predicted_ltv": 97.50,
+                "bot_type": "apex_vips"
+            }
+        }],
+        "access_token": ACCESS_TOKEN
+    }
 
-log.info(f"📤 [CAPI] Enviando evento Lead para Meta | UID: {uid}")
-try:
-    resp = requests.post(
-        f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events",
-        json=payload,
-        timeout=15
-    )
-    log.info(f"✅ [CAPI] Lead enviado | UID: {uid} | Trigger: {trigger} | Status HTTP: {resp.status_code} | Resposta: {resp.text}")
-except Exception as e:
-    log.error(f"❌ [CAPI] Erro ao enviar Lead | UID: {uid} | Erro: {e}")
-```
+    log.info(f"[CAPI] Enviando evento Lead para Meta | UID: {uid}")
+    try:
+        resp = requests.post(
+            f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events",
+            json=payload,
+            timeout=15
+        )
+        log.info(f"[CAPI] Lead enviado | UID: {uid} | Trigger: {trigger} | Status: {resp.status_code}")
+    except Exception as e:
+        log.error(f"[CAPI] Erro ao enviar Lead | UID: {uid} | Erro: {e}")
+
 
 def enviar_initiatecheckout_capi(uid: int):
-log.info(f”🛒 [CAPI] Enviando InitiateCheckout | UID: {uid}”)
+    log.info(f"[CAPI] Enviando InitiateCheckout | UID: {uid}")
 
-```
-payload = {
-    "data": [{
-        "event_name": "InitiateCheckout",
-        "event_time": int(time.time()),
-        "event_id": f"initiate_{uid}_{date.today()}",
-        "action_source": "chat",
-        "user_data": {"external_id": [hash_data(str(uid))]},
-        "custom_data": {
-            "currency": "BRL",
-            "value": 12.90,
-            "content_category": "adult_content",
-            "niche": "hot_adult_vip",
-            "predicted_ltv": 97.50
-        }
-    }],
-    "access_token": ACCESS_TOKEN
-}
+    payload = {
+        "data": [{
+            "event_name": "InitiateCheckout",
+            "event_time": int(time.time()),
+            "event_id": f"initiate_{uid}_{date.today()}",
+            "action_source": "chat",
+            "user_data": {"external_id": [hash_data(str(uid))]},
+            "custom_data": {
+                "currency": "BRL",
+                "value": 12.90,
+                "content_category": "adult_content",
+                "niche": "hot_adult_vip",
+                "predicted_ltv": 97.50
+            }
+        }],
+        "access_token": ACCESS_TOKEN
+    }
 
-try:
-    resp = requests.post(
-        f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events",
-        json=payload,
-        timeout=15
-    )
-    log.info(f"✅ [CAPI] InitiateCheckout enviado | UID: {uid} | Status HTTP: {resp.status_code} | Resposta: {resp.text}")
-except Exception as e:
-    log.error(f"❌ [CAPI] Erro ao enviar InitiateCheckout | UID: {uid} | Erro: {e}")
-```
+    try:
+        resp = requests.post(
+            f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events",
+            json=payload,
+            timeout=15
+        )
+        log.info(f"[CAPI] InitiateCheckout enviado | UID: {uid} | Status: {resp.status_code}")
+    except Exception as e:
+        log.error(f"[CAPI] Erro ao enviar InitiateCheckout | UID: {uid} | Erro: {e}")
+
 
 # ====================== HANDLERS ======================
-
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-uid = update.effective_user.id
-username = update.effective_user.username or “sem_username”
-log.info(f”▶️  [TELEGRAM] /start recebido | UID: {uid} | Username: @{username}”)
-enviar_lead_capi(uid, “start”)
-log.info(f”✅ [PROCESSADO] Lead /start capturado e enviado para Meta CAPI”)
+    uid = update.effective_user.id
+    username = update.effective_user.username or "sem_username"
+    log.info(f"[TELEGRAM] /start recebido | UID: {uid} | Username: @{username}")
+    enviar_lead_capi(uid, "start")
+    log.info(f"[PROCESSADO] Lead /start capturado e enviado para Meta CAPI")
+
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-uid = update.effective_user.id
-username = update.effective_user.username or “sem_username”
-text = (update.message.text or “”).lower().strip()
+    uid = update.effective_user.id
+    username = update.effective_user.username or "sem_username"
+    text = (update.message.text or "").lower().strip()
 
-```
-log.info(f"💬 [TELEGRAM] Mensagem recebida | UID: {uid} | Username: @{username} | Texto: '{text}'")
+    log.info(f"[TELEGRAM] Mensagem recebida | UID: {uid} | Username: @{username} | Texto: {text}")
 
-enviar_lead_capi(uid, "user_message")
+    enviar_lead_capi(uid, "user_message")
 
-payment_keywords = ["pix", "pagar", "pagamento", "qr", "como pago", "valor", "preço", "preco"]
-matched = [kw for kw in payment_keywords if kw in text]
+    payment_keywords = ["pix", "pagar", "pagamento", "qr", "como pago", "valor", "preco"]
+    matched = [kw for kw in payment_keywords if kw in text]
 
-if matched:
-    log.info(f"💰 [INTENT] Intenção de pagamento detectada | UID: {uid} | Keywords: {matched}")
-    enviar_lead_capi(uid, "payment_intent")
-    enviar_initiatecheckout_capi(uid)
-    log.info(f"✅ [PROCESSADO] InitiateCheckout enviado para Meta CAPI | UID: {uid}")
-else:
-    log.info(f"📨 [INTENT] Mensagem comum, sem intenção de pagamento | UID: {uid}")
-```
+    if matched:
+        log.info(f"[INTENT] Intencao de pagamento detectada | UID: {uid} | Keywords: {matched}")
+        enviar_lead_capi(uid, "payment_intent")
+        enviar_initiatecheckout_capi(uid)
+        log.info(f"[PROCESSADO] InitiateCheckout enviado para Meta CAPI | UID: {uid}")
+    else:
+        log.info(f"[INTENT] Mensagem comum, sem intencao de pagamento | UID: {uid}")
+
 
 # ====================== EVENT LOOP EM THREAD DEDICADA ======================
-
-# Solução para Gunicorn multi-worker: loop roda em thread própria,
-
-# acessível por TODOS os workers via variável global.
-
-log.info(“🔧 Construindo Application do Telegram…”)
+log.info("Construindo Application do Telegram...")
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-application.add_handler(CommandHandler(“start”, start_handler))
+application.add_handler(CommandHandler("start", start_handler))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-log.info(“✅ Handlers registrados: /start + mensagens de texto”)
+log.info("Handlers registrados: /start + mensagens de texto")
 
 # Cria um loop dedicado que roda em thread separada
-
 bot_loop = asyncio.new_event_loop()
 
 def start_bot_loop(loop: asyncio.AbstractEventLoop):
-asyncio.set_event_loop(loop)
-loop.run_forever()
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
 
 bot_thread = threading.Thread(target=start_bot_loop, args=(bot_loop,), daemon=True)
 bot_thread.start()
-log.info(“✅ Thread do event loop iniciada”)
+log.info("Thread do event loop iniciada")
 
-# Inicializa o Application dentro do loop dedicado (blocking até terminar)
-
-log.info(“⚙️  Inicializando Application do Telegram (initialize + start)…”)
+# Inicializa o Application dentro do loop dedicado
+log.info("Inicializando Application do Telegram...")
 try:
-future = asyncio.run_coroutine_threadsafe(application.initialize(), bot_loop)
-future.result(timeout=30)
-future = asyncio.run_coroutine_threadsafe(application.start(), bot_loop)
-future.result(timeout=30)
-log.info(“✅ Application do Telegram inicializada e startada com sucesso!”)
+    future = asyncio.run_coroutine_threadsafe(application.initialize(), bot_loop)
+    future.result(timeout=30)
+    future = asyncio.run_coroutine_threadsafe(application.start(), bot_loop)
+    future.result(timeout=30)
+    log.info("Application do Telegram inicializada e startada com sucesso!")
 except Exception as e:
-log.error(f”❌ Falha ao inicializar Application do Telegram: {e}”)
-raise
+    log.error(f"Falha ao inicializar Application do Telegram: {e}")
+    raise
+
 
 # ====================== FLASK ROUTES ======================
-
-@app.route(”/webhook”, methods=[“POST”])
+@app.route("/webhook", methods=["POST"])
 def webhook():
-log.info(“📥 [WEBHOOK] Requisição recebida”)
-try:
-data = request.json
-if not data:
-log.warning(“⚠️  [WEBHOOK] Body vazio recebido”)
-return “ok”, 200
+    log.info("[WEBHOOK] Requisicao recebida")
+    try:
+        data = request.json
+        if not data:
+            log.warning("[WEBHOOK] Body vazio recebido")
+            return "ok", 200
 
-```
-    log.info(f"📦 [WEBHOOK] Payload recebido | update_id: {data.get('update_id', 'N/A')}")
-    update = Update.de_json(data, application.bot)
-    log.info(f"🔄 [WEBHOOK] Processando update ID: {update.update_id}")
+        log.info(f"[WEBHOOK] Payload recebido | update_id: {data.get('update_id', 'N/A')}")
+        update = Update.de_json(data, application.bot)
+        log.info(f"[WEBHOOK] Processando update ID: {update.update_id}")
 
-    # Submete o update ao loop dedicado e aguarda conclusão
-    future = asyncio.run_coroutine_threadsafe(
-        application.process_update(update),
-        bot_loop
-    )
-    future.result(timeout=30)  # aguarda o handler terminar
+        future = asyncio.run_coroutine_threadsafe(
+            application.process_update(update),
+            bot_loop
+        )
+        future.result(timeout=30)
 
-    log.info(f"✅ [WEBHOOK] Update {update.update_id} processado com sucesso")
-    return "ok", 200
-except Exception as e:
-    log.error(f"❌ [WEBHOOK] Erro ao processar: {e}", exc_info=True)
-    return "error", 500
-```
+        log.info(f"[WEBHOOK] Update {update.update_id} processado com sucesso")
+        return "ok", 200
+    except Exception as e:
+        log.error(f"[WEBHOOK] Erro ao processar: {e}", exc_info=True)
+        return "error", 500
 
-@app.route(”/set-webhook”, methods=[“GET”])
+
+@app.route("/set-webhook", methods=["GET"])
 def set_webhook():
-log.info(“🔗 [SET-WEBHOOK] Iniciando configuração do webhook…”)
-if not WEBHOOK_BASE_URL:
-log.error(“❌ [SET-WEBHOOK] WEBHOOK_BASE_URL não configurada”)
-return “❌ WEBHOOK_BASE_URL não configurada”, 400
+    log.info("[SET-WEBHOOK] Iniciando configuracao do webhook...")
+    if not WEBHOOK_BASE_URL:
+        log.error("[SET-WEBHOOK] WEBHOOK_BASE_URL nao configurada")
+        return "WEBHOOK_BASE_URL nao configurada", 400
 
-```
-webhook_url = WEBHOOK_BASE_URL.rstrip("/") + "/webhook"
-log.info(f"🔗 [SET-WEBHOOK] URL alvo: {webhook_url}")
+    webhook_url = WEBHOOK_BASE_URL.rstrip("/") + "/webhook"
+    log.info(f"[SET-WEBHOOK] URL alvo: {webhook_url}")
 
-try:
-    async def setup():
-        await application.bot.delete_webhook(drop_pending_updates=True)
-        log.info("🗑️  [SET-WEBHOOK] Webhook anterior deletado")
-        await application.bot.set_webhook(webhook_url)
-        log.info(f"✅ [SET-WEBHOOK] Webhook definido para: {webhook_url}")
+    try:
+        async def setup():
+            await application.bot.delete_webhook(drop_pending_updates=True)
+            log.info("[SET-WEBHOOK] Webhook anterior deletado")
+            await application.bot.set_webhook(webhook_url)
+            log.info(f"[SET-WEBHOOK] Webhook definido para: {webhook_url}")
 
-    future = asyncio.run_coroutine_threadsafe(setup(), bot_loop)
-    future.result(timeout=30)
-    return f"✅ Webhook configurado!<br>URL: {webhook_url}", 200
-except Exception as e:
-    log.error(f"❌ [SET-WEBHOOK] Erro: {e}", exc_info=True)
-    return f"❌ Erro: {str(e)}", 500
-```
+        future = asyncio.run_coroutine_threadsafe(setup(), bot_loop)
+        future.result(timeout=30)
+        return f"Webhook configurado! URL: {webhook_url}", 200
+    except Exception as e:
+        log.error(f"[SET-WEBHOOK] Erro: {e}", exc_info=True)
+        return f"Erro: {str(e)}", 500
 
-@app.route(”/”, methods=[“GET”])
+
+@app.route("/", methods=["GET"])
 def home():
-log.info(“🏠 [HOME] Health check acessado”)
-return “ApexVips Bot está online ✅”, 200
+    log.info("[HOME] Health check acessado")
+    return "ApexVips Bot esta online", 200
+
 
 # ====================== START ======================
-
-if **name** == “**main**”:
-port = int(os.getenv(“PORT”, 8080))
-log.info(f”🌐 Subindo Flask na porta {port}”)
-app.run(host=“0.0.0.0”, port=port)
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8080))
+    log.info(f"Subindo Flask na porta {port}")
+    app.run(host="0.0.0.0", port=port)
