@@ -266,4 +266,4 @@ def home():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
     log.info(f"🌐 Subindo Flask na porta {port}")
-    app.run(host="0.0.0.0
+    app.run(host="0.0.0.0", port=port)
