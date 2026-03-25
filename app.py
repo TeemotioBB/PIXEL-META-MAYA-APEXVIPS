@@ -205,53 +205,46 @@ except Exception as e:
 # ====================== FLASK ROUTES ======================
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    logger.info("[WEBHOOK] Requisicao recebida")
+    logger.info("📥 [WEBHOOK] Requisição recebida do Telegram")
     try:
         data = request.json
         if not data:
-            log.warning("[WEBHOOK] Body vazio recebido")
+            logger.warning("⚠️ [WEBHOOK] Body vazio")
             return "ok", 200
 
-        logger.info(f"[WEBHOOK] Payload recebido | update_id: {data.get('update_id', 'N/A')}")
         update = Update.de_json(data, application.bot)
-        logger.info(f"[WEBHOOK] Processando update ID: {update.update_id}")
+        logger.info(f"🔄 [WEBHOOK] Update recebido - ID: {update.update_id}")
 
-        future = asyncio.run_coroutine_threadsafe(
-            application.process_update(update),
-            bot_loop
-        )
-        future.result(timeout=30)
-
-        logger.info(f"[WEBHOOK] Update {update.update_id} processado com sucesso")
+        # Processa de forma assíncrona
+        asyncio.create_task(application.process_update(update))
+        
         return "ok", 200
     except Exception as e:
-        log.error(f"[WEBHOOK] Erro ao processar: {e}", exc_info=True)
+        logger.error(f"❌ [WEBHOOK] Erro ao processar: {e}", exc_info=True)
         return "error", 500
 
 
 @app.route("/set-webhook", methods=["GET"])
 def set_webhook():
-    logger.info("[SET-WEBHOOK] Iniciando configuracao do webhook...")
+    logger.info("🔗 [SET-WEBHOOK] Iniciando configuração...")
     if not WEBHOOK_BASE_URL:
-        log.error("[SET-WEBHOOK] WEBHOOK_BASE_URL nao configurada")
-        return "WEBHOOK_BASE_URL nao configurada", 400
+        logger.error("❌ WEBHOOK_BASE_URL não configurada")
+        return "❌ WEBHOOK_BASE_URL não configurada", 400
 
     webhook_url = WEBHOOK_BASE_URL.rstrip("/") + "/webhook"
-    logger.info(f"[SET-WEBHOOK] URL alvo: {webhook_url}")
+    logger.info(f"🔗 URL alvo: {webhook_url}")
 
     try:
         async def setup():
             await application.bot.delete_webhook(drop_pending_updates=True)
-            logger.info("[SET-WEBHOOK] Webhook anterior deletado")
             await application.bot.set_webhook(webhook_url)
-            logger.info(f"[SET-WEBHOOK] Webhook definido para: {webhook_url}")
-
-        future = asyncio.run_coroutine_threadsafe(setup(), bot_loop)
-        future.result(timeout=30)
-        return f"Webhook configurado! URL: {webhook_url}", 200
+        
+        asyncio.run(setup())
+        logger.info(f"✅ Webhook configurado com sucesso: {webhook_url}")
+        return f"✅ Webhook configurado!<br>URL: {webhook_url}", 200
     except Exception as e:
-        log.error(f"[SET-WEBHOOK] Erro: {e}", exc_info=True)
-        return f"Erro: {str(e)}", 500
+        logger.error(f"❌ Erro no set-webhook: {e}", exc_info=True)
+        return f"❌ Erro: {e}", 500
 
 
 @app.route("/", methods=["GET"])
