@@ -71,7 +71,7 @@ def enviar_initiatecheckout_capi(uid: int):
             "event_id": f"init_{uid}_{int(time.time())}",
             "action_source": "chat",
             "user_data": {"external_id": [hash_data(str(uid))]},
-            "custom_data": {"currency": "BRL", "value": 12.90}
+            "custom_data": {"currency": "BRL", "value": 0.00}
         }],
         "access_token": ACCESS_TOKEN
     }
