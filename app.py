@@ -7,8 +7,9 @@ import asyncio
 import threading
 import requests
 import redis
+import ast
 from datetime import date
-from flask import Flask, request
+from flask import Flask, request, redirect
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes
 
@@ -35,6 +36,7 @@ except Exception as e:
     logger.error(f"❌ Erro Redis: {e}")
     raise
 
+# ====================== USER DATA ======================
 def montar_user_data(uid):
     """Busca dados no Redis e monta o dicionário user_data para a Meta"""
     user_data = {"external_id": [hash_data(str(uid))]}
@@ -49,7 +51,6 @@ def montar_user_data(uid):
         logger.info(f"[montar_user_data] FBP incluído → {fbp[:50]}...")
 
     if fbc_raw:
-        # Formata corretamente conforme documentação oficial do Meta
         creation_time = int(time.time() * 1000)  # milissegundos
         fbc_formatted = f"fb.1.{creation_time}.{fbc_raw}"
         user_data["fbc"] = [fbc_formatted]
@@ -61,7 +62,6 @@ def montar_user_data(uid):
         ua = 'TelegramBot/1.0'
 
     user_data["client_user_agent"] = [ua]
-
     return user_data
 
 # ====================== CAPI FUNCTIONS ======================
@@ -71,7 +71,7 @@ def enviar_lead_capi(uid: int, trigger: str):
         return
     r.set(redis_key, "1", ex=86400)
 
-    user_data = montar_user_data(uid) 
+    user_data = montar_user_data(uid)
 
     payload = {
         "data": [{
@@ -87,16 +87,16 @@ def enviar_lead_capi(uid: int, trigger: str):
     try:
         requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
         logger.info(f"🟢 [CAPI] Lead ENVIADO | UID: {uid} | Tracking: {'fbc' in user_data}")
-    except Exception as e: logger.error(f"❌ Erro Lead: {e}")
+    except Exception as e:
+        logger.error(f"❌ Erro Lead: {e}")
 
 def enviar_initiatecheckout_capi(uid: int):
     redis_key = f"checkout_sent:{uid}"
     if r.exists(redis_key):
         return
     r.set(redis_key, "1", ex=3600)
-    
-    user_data = montar_user_data(uid)
 
+    user_data = montar_user_data(uid)
     payload = {
         "data": [{
             "event_name": "InitiateCheckout",
@@ -111,18 +111,18 @@ def enviar_initiatecheckout_capi(uid: int):
     try:
         requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
         logger.info(f"🔥 [CAPI] Checkout ENVIADO | UID: {uid} | Tracking: {'fbc' in user_data}")
-    except Exception as e: logger.error(f"❌ Erro Checkout: {e}")
+    except Exception as e:
+        logger.error(f"❌ Erro Checkout: {e}")
 
 def enviar_purchase_capi(uid: int, valor: float):
     user_data = montar_user_data(uid)
-
     payload = {
         "data": [{
             "event_name": "Purchase",
             "event_time": int(time.time()),
             "event_id": f"pur_{uid}_{int(time.time())}",
             "action_source": "chat",
-            "user_data": user_data, 
+            "user_data": user_data,
             "custom_data": {"value": valor, "currency": "BRL"}
         }],
         "access_token": ACCESS_TOKEN
@@ -130,7 +130,8 @@ def enviar_purchase_capi(uid: int, valor: float):
     try:
         requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
         logger.info(f"💰 [CAPI] Purchase ENVIADO | UID: {uid} | R$ {valor:.2f} | Tracking: {'fbc' in user_data}")
-    except Exception as e: logger.error(f"❌ Erro Purchase: {e}")
+    except Exception as e:
+        logger.error(f"❌ Erro Purchase: {e}")
 
 # ====================== HANDLERS ======================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -138,37 +139,36 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     payload = " ".join(args) if args else ""
 
-    logger.info(f"[START] UID: {uid} | Payload recebido: {payload}")
+    logger.info(f"[START] UID: {uid} | Payload: {payload}")
 
-    saved_fbp = False
-    saved_fbc = False
+    if payload.startswith("track_"):
+        temp_key = payload
+        tracking_str = r.get(f"tracking:{temp_key}")
+       
+        if tracking_str:
+            try:
+                tracking_data = ast.literal_eval(tracking_str)
 
-    if payload:
-        try:
-            # Parsing mais robusto (aceita fbp_ e fbc_)
-            if "fbp_" in payload:
-                fbp_part = payload.split("fbp_")[1]
-                fbp_val = fbp_part.split("_fbc_")[0] if "_fbc_" in fbp_part else fbp_part
-                r.set(f"fbp:{uid}", fbp_val.strip(), ex=259200)
-                logger.info(f"✅ FBP salvo para UID {uid} | {fbp_val[:60]}...")
-                saved_fbp = True
+                if "fbp" in tracking_data:
+                    r.set(f"fbp:{uid}", tracking_data["fbp"], ex=259200)
+                    logger.info(f"✅ FBP salvo (via tracking) para UID {uid}")
 
-            if "fbc_" in payload:
-                fbc_val = payload.split("fbc_")[-1].strip()
-                r.set(f"fbclid:{uid}", fbc_val, ex=259200)
-                logger.info(f"✅ FBC salvo (raw) para UID {uid} | {fbc_val[:80]}...")
-                saved_fbc = True
+                if "fbc" in tracking_data:
+                    r.set(f"fbclid:{uid}", tracking_data["fbc"], ex=259200)
+                    logger.info(f"✅ FBC salvo (já formatado) para UID {uid}")
 
-        except Exception as e:
-            logger.error(f"❌ Erro ao processar parâmetros do start: {e}")
+                r.delete(f"tracking:{temp_key}")
+            except Exception as e:
+                logger.error(f"❌ Erro ao processar tracking data: {e}")
+        else:
+            logger.warning(f"[START] Chave temporária não encontrada: {temp_key}")
+    else:
+        logger.info("[START] Nenhum parâmetro de tracking recebido (acesso direto)")
 
-    # Delay pequeno para Redis processar
-    await asyncio.sleep(0.4)
-
+    await asyncio.sleep(0.3)
     enviar_lead_capi(uid, "start")
 
-    logger.info(f"[START] Finalizado UID {uid} | FBP salvo: {saved_fbp} | FBC salvo: {saved_fbc}")
-
+# ====================== BUTTON E MESSAGE HANDLERS ======================
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = query.from_user.id
@@ -194,15 +194,41 @@ application.add_handler(CallbackQueryHandler(button_handler))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
 bot_loop = asyncio.new_event_loop()
+
 def run_bot():
     asyncio.set_event_loop(bot_loop)
     bot_loop.run_until_complete(application.initialize())
-    bot_loop.run_complete = application.start()
+    bot_loop.run_until_complete(application.start())
     bot_loop.run_forever()
 
 threading.Thread(target=run_bot, daemon=True).start()
 
 # ====================== ROUTES ======================
+@app.route('/apex-tracking', methods=['GET'])
+def apex_tracking():
+    fbclid = request.args.get('fbclid')
+    fbp = request.args.get('fbp')
+   
+    temp_key = f"track_{int(time.time())}"
+    tracking_data = {}
+
+    if fbp:
+        tracking_data["fbp"] = fbp
+        logger.info(f"[TRACKING] FBP recebido e salvo → {fbp[:50]}...")
+
+    if fbclid:
+        creation_time = int(time.time() * 1000)
+        fbc_formatted = f"fb.1.{creation_time}.{fbclid}"
+        tracking_data["fbc"] = fbc_formatted
+        logger.info(f"[TRACKING] FBC gerado → {fbc_formatted[:100]}...")
+
+    r.set(f"tracking:{temp_key}", str(tracking_data), ex=600)
+
+    bot_url = f"https://t.me/Mayaoficial_bot?start={temp_key}"
+   
+    logger.info(f"[TRACKING] Redirecionando UID temporário → {temp_key}")
+    return redirect(bot_url)
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
@@ -221,23 +247,30 @@ def apex_webhook():
     evento = data.get("event")
     uid = data.get("customer", {}).get("chat_id")
     val_raw = data.get("transaction", {}).get("plan_value", 0)
-    if not uid: return "ok", 200
-    if evento == "user_joined": enviar_lead_capi(uid, "apex_joined")
-    elif evento == "payment_created": enviar_initiatecheckout_capi(uid)
-    elif evento == "payment_approved": enviar_purchase_capi(uid, float(val_raw)/100)
+    if not uid: 
+        return "ok", 200
+    if evento == "user_joined": 
+        enviar_lead_capi(uid, "apex_joined")
+    elif evento == "payment_created": 
+        enviar_initiatecheckout_capi(uid)
+    elif evento == "payment_approved": 
+        enviar_purchase_capi(uid, float(val_raw)/100)
     return "ok", 200
 
 @app.route("/set-webhook", methods=["GET"])
 def set_webhook():
     url = f"{WEBHOOK_BASE_URL.rstrip('/')}/webhook"
     try:
-        async def s(): await application.bot.set_webhook(url)
+        async def s(): 
+            await application.bot.set_webhook(url)
         asyncio.run_coroutine_threadsafe(s(), bot_loop).result()
         return f"✅ Webhook configurado: {url}", 200
-    except Exception as e: return str(e), 500
+    except Exception as e: 
+        return str(e), 500
 
 @app.route("/", methods=["GET"])
-def home(): return "Bot Online", 200
+def home(): 
+    return "Bot Online", 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
