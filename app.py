@@ -31,70 +31,55 @@ if REDIS_URL:
     try:
         r = redis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=5)
         r.ping()
-        logger.info("✅ Redis conectado com sucesso!")
+        logger.info("✅ Redis conectado!")
     except Exception as e:
         logger.error(f"⚠️ Redis Offline: {e}")
 
-# ====================== ENGINE CAPI (CENTRAL DE LOGS) ======================
+# ====================== CAPI CENTRALIZADA ======================
 
 def enviar_evento_capi(uid: int, event_name: str, custom_data=None, event_id=None):
-    """
-    Envia qualquer evento para o Meta e gera logs detalhados no Railway.
-    """
-    logger.info(f"📡 [CAPI] Iniciando tentativa de envio: {event_name} para o usuário {uid}")
-    
+    """Envia eventos para o Meta com logs obrigatórios no Railway"""
+    logger.info(f"📡 [CAPI] Tentando enviar {event_name} para {uid}")
     try:
-        # 1. Montagem do Payload
         payload = {
             "data": [{
                 "event_name": event_name,
                 "event_time": int(time.time()),
                 "event_id": event_id or f"{event_name.lower()}_{uid}_{int(time.time())}",
                 "action_source": "chat",
-                "user_data": {
-                    "external_id": [hash_data(str(uid))]
-                },
+                "user_data": {"external_id": [hash_data(str(uid))]},
                 "custom_data": custom_data or {}
             }],
             "access_token": ACCESS_TOKEN
         }
-        
-        # 2. Envio para o Meta
         url = f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events"
         resp = requests.post(url, json=payload, timeout=10)
-        
-        # 3. Logs de Resposta
-        if resp.status_code == 200:
-            logger.info(f"✅ [CAPI SUCCESS] Evento '{event_name}' entregue ao Meta. Status: 200 OK")
-        else:
-            logger.error(f"❌ [CAPI ERROR] Meta recusou o evento '{event_name}'. Status: {resp.status_code} | Resposta: {resp.text}")
-            
+        logger.info(f"✅ [CAPI RESPONSE] {event_name}: {resp.status_code}")
     except Exception as e:
-        logger.error(f"💥 [CAPI CRITICAL] Falha técnica ao conectar com o Meta ({event_name}): {e}")
+        logger.error(f"❌ [CAPI ERROR] {event_name}: {e}")
 
 # ====================== HANDLERS TELEGRAM ======================
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    logger.info(f"🚀 [BOT] Recebido /start do usuário {uid} (Rastreio Silencioso)")
-
-    # --- EVENTO 1: LEAD (Com trava de 24h no Redis) ---
+    logger.info(f"🚀 [BOT] /start de {uid}")
+    
+    # Lead no /start com trava do Redis
     redis_key = f"lead_sent:{uid}:{date.today()}"
-    if r and r.exists(redis_key):
-        logger.info(f"⏭️ [SKIP] Lead para {uid} já enviado hoje. Ignorando CAPI.")
-    else:
+    if r and not r.exists(redis_key):
         if r: r.set(redis_key, "1", ex=86400)
         threading.Thread(target=enviar_evento_capi, args=(uid, "Lead")).start()
+    else:
+        logger.info(f"⏭️ Lead já enviado hoje para {uid}")
 
-    # --- EVENTO 2: INITIATE CHECKOUT (Sempre que iniciar o bot) ---
-    threading.Thread(target=enviar_evento_capi, args=(uid, "InitiateCheckout")).start()
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
 
-    # A linha de reply_text foi removida para o bot não interferir na experiência do usuário.
-
-# ====================== ROTAS FLASK ======================
+# ====================== ENGINE ======================
 app = Flask(__name__)
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 application.add_handler(CommandHandler("start", start_handler))
+application.add_handler(CallbackQueryHandler(button_handler))
 
 bot_loop = asyncio.new_event_loop()
 bot_ready = threading.Event()
@@ -104,80 +89,65 @@ def run_bot_init():
     bot_loop.run_until_complete(application.initialize())
     bot_loop.run_until_complete(application.start())
     bot_ready.set()
-    logger.info("🤖 Bot (Telegram Engine) iniciado.")
+    logger.info("✅ Bot pronto.")
     bot_loop.run_forever()
 
 threading.Thread(target=run_bot_init, daemon=True).start()
 
+# ====================== ROTAS WEBHOOK ======================
+
 @app.route("/webhook", methods=["POST"])
 def telegram_webhook():
-    try:
-        data = request.get_json()
-        logger.info("📩 [WEBHOOK] Mensagem recebida do Telegram.")
-        if data:
-            update = Update.de_json(data, application.bot)
-            asyncio.run_coroutine_threadsafe(application.process_update(update), bot_loop)
-    except Exception as e:
-        logger.error(f"❌ [WEBHOOK ERROR] Erro no processamento: {e}")
+    data = request.get_json()
+    if data:
+        update = Update.de_json(data, application.bot)
+        asyncio.run_coroutine_threadsafe(application.process_update(update), bot_loop)
     return "ok", 200
 
 @app.route('/apex-webhook', methods=['POST'])
 def apex_webhook():
-    """
-    Recebe confirmação de pagamento da Apex e envia o evento Purchase (Compra).
-    """
     data = request.get_json() or {}
     evento = data.get("event")
     uid = data.get("customer", {}).get("chat_id")
     transaction = data.get("transaction", {})
+    t_id = transaction.get("id")
     
-    logger.info(f"📢 [APEX WEBHOOK] Evento recebido: {evento} | Usuário: {uid}")
+    logger.info(f"📢 [APEX] Evento: {evento} | Usuário: {uid}")
 
-    if not uid:
-        return "ok", 200
+    if not uid: return "ok", 200
 
-    if evento == "payment_approved":
-        t_id = transaction.get("id")
-        valor = float(transaction.get("plan_value") or 0) / 100
-        
-        # --- EVENTO 3: PURCHASE ---
-        custom_data = {"value": valor, "currency": "BRL"}
-        event_id = f"pur_{t_id}"
-        
-        threading.Thread(target=enviar_evento_capi, args=(uid, "Purchase", custom_data, event_id)).start()
+    # 1. INITIATE CHECKOUT (Quando o cliente abre o checkout na Apex)
+    if evento == "checkout_created": # Verifique se o nome do evento na Apex é esse mesmo
+        enviar_evento_capi(uid, "InitiateCheckout")
 
-        # Envio da mensagem VIP
-        async def send_vip_msg():
+    # 2. PURCHASE (Quando o pagamento é aprovado)
+    elif evento == "payment_approved":
+        val = float(transaction.get("plan_value") or 0) / 100
+        enviar_evento_capi(uid, "Purchase", {"value": val, "currency": "BRL"}, f"pur_{t_id}")
+
+        # Entrega automática do link
+        async def send_vip():
             try:
-                msg = "🚀 *Seu acesso VIP foi liberado!*\n\nClique no botão abaixo para entrar."
+                msg = "🚀 *Seu acesso VIP foi liberado!*\n\nClique abaixo para entrar."
                 kb = InlineKeyboardMarkup([[InlineKeyboardButton("Entrar no VIP 💎", url="https://t.me/+SEU_LINK_AQUI")]])
                 await application.bot.send_message(chat_id=uid, text=msg, reply_markup=kb, parse_mode="Markdown")
-                logger.info(f"✅ [BOT] Mensagem VIP enviada para {uid}")
             except Exception as e:
-                logger.error(f"❌ [BOT ERROR] Falha ao enviar link VIP: {e}")
-
-        asyncio.run_coroutine_threadsafe(send_vip_msg(), bot_loop)
+                logger.error(f"Erro msg VIP: {e}")
+        
+        asyncio.run_coroutine_threadsafe(send_vip(), bot_loop)
 
     return "ok", 200
 
 @app.route("/set-webhook", methods=["GET"])
 def set_webhook():
-    if not bot_ready.wait(timeout=30):
-        return "❌ [ERRO] Bot não inicializou.", 503
+    if not bot_ready.wait(timeout=20): return "Erro", 503
     url = f"{WEBHOOK_BASE_URL.rstrip('/')}/webhook"
-    async def setup():
-        await application.bot.delete_webhook()
-        return await application.bot.set_webhook(url=url)
-    try:
-        res = asyncio.run_coroutine_threadsafe(setup(), bot_loop).result(timeout=20)
-        return f"✅ Webhook configurado: {url} | Resultado: {res}", 200
-    except Exception as e:
-        return f"❌ Erro ao configurar: {e}", 500
+    async def setup(): return await application.bot.set_webhook(url=url)
+    res = asyncio.run_coroutine_threadsafe(setup(), bot_loop).result()
+    return f"✅ Webhook: {res}", 200
 
-@app.route("/", methods=["GET"])
-def home():
-    return f"Bot Online! Status: {'Pronto' if bot_ready.is_set() else 'Iniciando...'}", 200
+@app.route("/")
+def home(): return "Bot Online", 200
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
