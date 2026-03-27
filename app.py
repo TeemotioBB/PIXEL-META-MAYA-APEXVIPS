@@ -100,28 +100,54 @@ threading.Thread(target=run_bot_init, daemon=True).start()
 @app.route('/apex-webhook', methods=['POST', 'GET'])
 def apex_webhook():
     if request.method == 'GET':
+        data = request.args.to_dict()
+    else:
+        data = request.get_json(silent=True) or request.form.to_dict() or {}
+
+    if not data:
         return {"status": "ok", "message": "Endpoint ativo"}, 200
 
-    data = request.get_json(silent=True) or {}
-    logger.info(f"📢 [APEX] Webhook recebido: {data.get('event')}")
+    logger.info(f"📢 [APEX] Dados recebidos: {data.get('event')}")
 
     evento = data.get("event")
+    
+    # Captura de dados (Imã forte para link de teste e oficial)
     customer = data.get("customer", {})
-    uid = customer.get("chat_id")
+    uid = data.get("customer[chat_id]") or (customer.get("chat_id") if isinstance(customer, dict) else None)
     
     transaction = data.get("transaction", {})
-    plan_name = transaction.get("plan_name", "Plano VIP")
-    plan_value_raw = transaction.get("plan_value") or 0
+    plan_name = data.get("transaction[plan_name]") or (transaction.get("plan_name") if isinstance(transaction, dict) else "Plano VIP")
+    plan_value_raw = data.get("transaction[plan_value]") or (transaction.get("plan_value") if isinstance(transaction, dict) else 0)
     
-    # Regra de centavos (Ex: 4990 -> 49.90)
     valor_real = float(plan_value_raw) / 100
-    
-    # ID único para evitar duplicidade no Meta
-    t_id = transaction.get("internal_transaction_id") or f"at_{int(time.time())}"
+    t_id = data.get("transaction[internal_transaction_id]") or (transaction.get("internal_transaction_id") if isinstance(transaction, dict) else f"at_{int(time.time())}")
 
     if not uid:
-        logger.warning("⚠️ Webhook recebido sem chat_id")
         return {"status": "ok"}, 200
+
+    # --- FUNIL CORRIGIDO ---
+
+    # 1. CHECKOUT: Apenas quando gerar o pagamento (Pix)
+    if evento == "payment_created":
+        logger.info(f"🛒 [APEX] Enviando InitiateCheckout (0.00) | uid={uid}")
+        enviar_evento_capi_async(uid, "InitiateCheckout", {
+            "value": 0.00,
+            "currency": "BRL",
+            "content_name": plan_name
+        })
+
+    # 2. PURCHASE: Quando o pagamento for aprovado
+    elif evento == "payment_approved":
+        logger.info(f"💰 [APEX] Enviando Purchase (R${valor_real:.2f}) | uid={uid}")
+        enviar_evento_capi_async(uid, "Purchase", {
+            "value": valor_real,
+            "currency": "BRL",
+            "content_name": plan_name,
+            "num_items": 1
+        }, f"pur_{t_id}")
+
+    # Ignoramos o 'user_joined' aqui para não duplicar com o Lead do /start
+    return {"status": "ok", "message": "Processado"}, 200
 
     # Mapeamento baseado nos exemplos da Apex
     if evento in ["user_joined", "payment_created"]:
