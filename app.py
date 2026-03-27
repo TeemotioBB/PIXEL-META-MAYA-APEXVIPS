@@ -52,7 +52,7 @@ def enviar_evento_capi(uid: int, event_name: str, custom_data=None, event_id=Non
         }
         url = f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events"
         resp = requests.post(url, json=payload, timeout=15)
-        logger.info(f"✅ [CAPI RESPONSE] {event_name} → {resp.status_code}")
+        logger.info(f"✅ [CAPI RESPONSE] {event_name} → Status: {resp.status_code}")
     except Exception as e:
         logger.error(f"❌ [CAPI ERROR] {event_name}: {e}")
 
@@ -68,12 +68,14 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
 
-# ====================== FLASK APP ======================
+# ====================== FLASK + BOT ======================
 app = Flask(__name__)
+
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 application.add_handler(CommandHandler("start", start_handler))
 application.add_handler(CallbackQueryHandler(button_handler))
 
+# Inicia o loop asyncio em thread separada
 bot_loop = asyncio.new_event_loop()
 
 def run_bot():
@@ -83,9 +85,8 @@ def run_bot():
         bot_loop.run_until_complete(application.start())
         logger.info("✅ Bot Telegram inicializado com sucesso!")
     except Exception as e:
-        logger.error(f"❌ Erro ao iniciar o bot: {e}")
+        logger.error(f"❌ Erro ao iniciar bot: {e}")
 
-# Inicia o bot em background
 threading.Thread(target=run_bot, daemon=True).start()
 
 # ====================== ROTAS ======================
@@ -100,7 +101,7 @@ def telegram_webhook():
 @app.route('/apex-webhook', methods=['POST'])
 def apex_webhook():
     data = request.get_json(silent=True) or {}
-    logger.info(f"📥 [APEX WEBHOOK] Recebido | IP: {request.remote_addr} | Dados: {data}")
+    logger.info(f"📥 [APEX WEBHOOK] Recebido | IP: {request.remote_addr} | Evento: {data.get('event')} | Dados: {data}")
 
     evento = data.get("event")
     customer = data.get("customer") or {}
@@ -110,7 +111,7 @@ def apex_webhook():
         logger.warning("⚠️ Apex webhook sem chat_id")
         return "ok", 200
 
-    logger.info(f"🔄 Processando evento Apex: {evento} | UID: {uid}")
+    logger.info(f"🔄 Processando evento: {evento} | UID: {uid}")
 
     if evento in ["checkout_created", "bill_created", "checkout_initiated"]:
         threading.Thread(target=enviar_evento_capi, args=(uid, "InitiateCheckout")).start()
@@ -123,7 +124,10 @@ def apex_webhook():
         except:
             val = 0.0
 
-        threading.Thread(target=enviar_evento_capi, args=(uid, "Purchase", {"value": val, "currency": "BRL"}, f"pur_{t_id}" if t_id else None)).start()
+        threading.Thread(
+            target=enviar_evento_capi,
+            args=(uid, "Purchase", {"value": val, "currency": "BRL"}, f"pur_{t_id}" if t_id else None)
+        ).start()
 
         # Envio da mensagem VIP
         async def send_vip():
@@ -131,32 +135,40 @@ def apex_webhook():
                 msg = "🚀 *Seu acesso VIP foi liberado!*\n\nClique abaixo para entrar."
                 kb = InlineKeyboardMarkup([[InlineKeyboardButton("Entrar no VIP 💎", url="https://t.me/+SEU_LINK_AQUI")]])
                 await application.bot.send_message(chat_id=uid, text=msg, reply_markup=kb, parse_mode="Markdown")
+                logger.info(f"✅ Mensagem VIP enviada para {uid}")
             except Exception as e:
-                logger.error(f"Erro mensagem VIP: {e}")
+                logger.error(f"❌ Erro mensagem VIP: {e}")
+
         asyncio.run_coroutine_threadsafe(send_vip(), bot_loop)
 
     return "ok", 200
 
 @app.route("/set-webhook", methods=["GET"])
 def set_webhook():
-    logger.info("🔧 Tentativa de configurar webhook do Telegram...")
+    logger.info("🔧 Tentando configurar webhook do Telegram...")
     url = f"{WEBHOOK_BASE_URL.rstrip('/')}/webhook"
+    
     try:
-        # Timeout curto para não travar
-        future = asyncio.run_coroutine_threadsafe(application.bot.set_webhook(url=url), bot_loop)
-        result = future.result(timeout=15)
+        # Timeout curto + tratamento de erro para não travar o worker
+        future = asyncio.run_coroutine_threadsafe(
+            application.bot.set_webhook(url=url, drop_pending_updates=True), 
+            bot_loop
+        )
+        result = future.result(timeout=10)   # máximo 10 segundos
         logger.info(f"✅ Webhook configurado com sucesso: {result}")
         return f"✅ Webhook configurado: {result}", 200
+    except asyncio.TimeoutError:
+        logger.error("❌ Timeout ao configurar webhook (10s)")
+        return "❌ Timeout ao configurar webhook", 500
     except Exception as e:
         logger.error(f"❌ Erro ao configurar webhook: {e}")
-        return f"❌ Erro: {e}", 500
+        return f"❌ Erro: {str(e)}", 500
 
 @app.route("/")
 def home():
     return "Bot Online ✅", 200
 
 if __name__ == "__main__":
-    # Força uso do servidor Flask (mais estável no Railway para esse caso)
     port = int(os.getenv("PORT", 8080))
-    logger.info(f"🚀 Iniciando servidor Flask na porta {port}")
+    logger.info(f"🚀 Iniciando servidor na porta {port}")
     app.run(host="0.0.0.0", port=port)
