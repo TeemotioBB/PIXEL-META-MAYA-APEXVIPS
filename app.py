@@ -8,8 +8,8 @@ import requests
 import redis
 from datetime import date
 from flask import Flask, request
-from telegram import Update
-from telegram.ext import Application, MessageHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # ====================== LOGGING ======================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -34,10 +34,9 @@ except Exception as e:
     logger.error(f"❌ Erro Redis: {e}")
     raise
 
-# ====================== CAPI FUNCTIONS (COM ANTI-DUPLICAÇÃO) ======================
+# ====================== CAPI FUNCTIONS ======================
 
 def enviar_lead_capi(uid: int, trigger: str):
-    # Trava por 24h para evitar duplicatas de Lead no mesmo dia
     redis_key = f"lead_sent:{uid}:{date.today()}"
     if not r.set(redis_key, "1", ex=86400, nx=True):
         return
@@ -57,7 +56,6 @@ def enviar_lead_capi(uid: int, trigger: str):
     logger.info(f"🟢 [CAPI] Lead Enviado: {uid}")
 
 def enviar_initiatecheckout_capi(uid: int, valor: float = 0.0, transaction_id: str = None):
-    # Deduplicação: Janela de 10 min ou ID fixo da Apex
     t_id = transaction_id or f"init_{uid}_{int(time.time() / 600)}"
     if not r.set(f"checkout_sent:{t_id}", "1", ex=600, nx=True):
         return
@@ -77,9 +75,7 @@ def enviar_initiatecheckout_capi(uid: int, valor: float = 0.0, transaction_id: s
     logger.info(f"🔥 [CAPI] Checkout Enviado: {uid} | R$ {valor}")
 
 def enviar_purchase_capi(uid: int, valor: float, transaction_id: str):
-    # Trava de 7 dias (Blindagem contra webhooks repetidos da Apex)
     if not r.set(f"pur_sent:{transaction_id}", "1", ex=604800, nx=True):
-        logger.info(f"⚠️ [CAPI] Compra {transaction_id} duplicada bloqueada.")
         return
 
     payload = {
@@ -99,7 +95,9 @@ def enviar_purchase_capi(uid: int, valor: float, transaction_id: str):
 # ====================== HANDLERS ======================
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"👤 [BOT] /start recebido: {update.effective_user.id}")
+    uid = update.effective_user.id
+    logger.info(f"👤 [BOT] /start recebido: {uid}")
+    await update.message.reply_text("Bem-vindo à ApexVips! Aguarde o processamento do seu acesso.")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -107,28 +105,25 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     cb_data = (query.data or "").lower()
 
-    # Filtro de Lead: Somente em botões de intenção real
-    if any(x in cb_data for x in ["precos", "planos", "saber_mais", "como_funciona"]):
+    if any(x in cb_data for x in ["precos", "planos", "saber_mais"]):
         enviar_lead_capi(uid, f"btn_{cb_data}")
-
-    # InitiateCheckout via clique no bot
     if any(x in cb_data for x in ["plan", "buy", "pix", "pay"]):
         enviar_initiatecheckout_capi(uid)
 
-# ====================== ENGINE & ROUTES ======================
+# ====================== ENGINE & FLASK ======================
 app = Flask(__name__)
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 application.add_handler(CommandHandler("start", start_handler))
 application.add_handler(CallbackQueryHandler(button_handler))
 
 bot_loop = asyncio.new_event_loop()
-def run_bot():
+
+def run_bot_init():
     asyncio.set_event_loop(bot_loop)
     bot_loop.run_until_complete(application.initialize())
     bot_loop.run_until_complete(application.start())
-    bot_loop.run_forever()
 
-threading.Thread(target=run_bot, daemon=True).start()
+threading.Thread(target=run_bot_init, daemon=True).start()
 
 @app.route("/webhook", methods=["POST"])
 def telegram_webhook():
@@ -136,22 +131,16 @@ def telegram_webhook():
         data = request.json
         if not data: return "ok", 200
         
-        # Pega o ID da mensagem para evitar duplicatas (Retries do Telegram)
         update_id = data.get("update_id")
-        if update_id:
-            # Se já processei esse ID nos últimos 10 segundos, ignoro
-            if not r.set(f"proc_upd:{update_id}", "1", ex=10, nx=True):
-                logger.info(f"⚠️ [WEBHOOK] Update {update_id} ignorado (Duplicata/Retry).")
-                return "ok", 200
+        if update_id and not r.set(f"proc_upd:{update_id}", "1", ex=10, nx=True):
+            return "ok", 200
 
         update = Update.de_json(data, application.bot)
         asyncio.run_coroutine_threadsafe(application.process_update(update), bot_loop)
-        
-        # Retorna OK imediatamente para o Telegram não tentar de novo
         return "ok", 200
     except Exception as e:
-        logger.error(f"❌ Erro Webhook: {e}")
-        return "ok", 200 # Sempre retorne OK para evitar loops de erro no Telegram
+        logger.error(f"❌ Erro Webhook Telegram: {e}")
+        return "ok", 200
 
 @app.route('/apex-webhook', methods=['POST'])
 def apex_webhook():
@@ -162,24 +151,35 @@ def apex_webhook():
     t_id = transaction.get("id")
     val_raw = float(transaction.get("plan_value", 0)) / 100
     
-    if not uid or not t_id: return "ok", 200
+    if not uid: return "ok", 200
 
+    # Lógica de CAPI
     if evento == "user_joined":
         enviar_lead_capi(uid, "apex_joined")
     elif evento == "payment_created":
         enviar_initiatecheckout_capi(uid, valor=val_raw, transaction_id=f"init_{t_id}")
     elif evento == "payment_approved":
         enviar_purchase_capi(uid, val_raw, transaction_id=f"pur_{t_id}")
+
+        # ENVIO DA MENSAGEM PARA O USUÁRIO (O que faltava)
+        async def send_success_msg():
+            try:
+                msg = "🚀 *Seu acesso VIP foi liberado!*\n\nClique no botão abaixo para entrar no canal oficial e começar a lucrar."
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("Entrar no Grupo VIP 💎", url="https://t.me/seu_link_aqui")]])
+                await application.bot.send_message(chat_id=uid, text=msg, reply_markup=kb, parse_mode="Markdown")
+            except Exception as e:
+                logger.error(f"Erro ao falar com user {uid}: {e}")
+
+        asyncio.run_coroutine_threadsafe(send_success_msg(), bot_loop)
+
     return "ok", 200
 
 @app.route("/set-webhook", methods=["GET"])
 def set_webhook():
     url = f"{WEBHOOK_BASE_URL.rstrip('/')}/webhook"
-    try:
-        async def s(): await application.bot.set_webhook(url)
-        asyncio.run_coroutine_threadsafe(s(), bot_loop).result()
-        return f"✅ Webhook configurado: {url}", 200
-    except Exception as e: return str(e), 500
+    async def s(): return await application.bot.set_webhook(url)
+    res = asyncio.run_coroutine_threadsafe(s(), bot_loop).result()
+    return f"✅ Webhook configurado: {url}" if res else "❌ Erro", 200
 
 @app.route("/", methods=["GET"])
 def home(): return "Bot Online", 200
