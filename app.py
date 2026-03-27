@@ -35,20 +35,37 @@ except Exception as e:
     logger.error(f"❌ Erro Redis: {e}")
     raise
 
+def montar_user_data(uid):
+    """Busca dados no Redis e monta o dicionário user_data para a Meta"""
+    user_data = {"external_id": [hash_data(str(uid))]}
+    
+    fbp = r.get(f"fbp:{uid}")
+    fbc_raw = r.get(f"fbclid:{uid}")
+    
+    if fbp:
+        user_data["fbp"] = [fbp]
+    
+    if fbc_raw:
+        # Formato oficial: fb.1.TEMPO.VALOR
+        user_data["fbc"] = [f"fb.1.{int(time.time())}.{fbc_raw}"]
+    
+    try:
+        ua = request.headers.get('User-Agent', 'TelegramBot/1.0')
+    except Exception:
+        ua = 'TelegramBot/1.0'
+    
+    user_data["client_user_agent"] = [ua]
+    
+    return user_data
+
 # ====================== CAPI FUNCTIONS ======================
 def enviar_lead_capi(uid: int, trigger: str):
     redis_key = f"lead_sent:{uid}:{date.today()}"
     if r.exists(redis_key):
-        logger.info(f"⚠️ [CAPI] Lead para {uid} já enviado hoje.")
         return
     r.set(redis_key, "1", ex=86400)
 
-    # Tenta recuperar o fbclid do Redis (salvo no /start)
-    fbclid = r.get(f"fbclid:{uid}")
-    
-    user_data = {"external_id": [hash_data(str(uid))]}
-    if fbclid:
-        user_data["fbc"] = [f"fb.1.{int(time.time())}.{fbclid}"]
+    user_data = montar_user_data(uid) 
 
     payload = {
         "data": [{
@@ -63,7 +80,7 @@ def enviar_lead_capi(uid: int, trigger: str):
     }
     try:
         requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
-        logger.info(f"🟢 [CAPI] Lead ENVIADO | UID: {uid} | FBCLID: {'Sim' if fbclid else 'Não'}")
+        logger.info(f"🟢 [CAPI] Lead ENVIADO | UID: {uid} | Tracking: {'fbc' in user_data}")
     except Exception as e: logger.error(f"❌ Erro Lead: {e}")
 
 def enviar_initiatecheckout_capi(uid: int):
@@ -72,10 +89,7 @@ def enviar_initiatecheckout_capi(uid: int):
         return
     r.set(redis_key, "1", ex=3600)
     
-    fbclid = r.get(f"fbclid:{uid}")
-    user_data = {"external_id": [hash_data(str(uid))]}
-    if fbclid:
-        user_data["fbc"] = [f"fb.1.{int(time.time())}.{fbclid}"]
+    user_data = montar_user_data(uid)
 
     payload = {
         "data": [{
@@ -90,14 +104,11 @@ def enviar_initiatecheckout_capi(uid: int):
     }
     try:
         requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
-        logger.info(f"🔥 [CAPI] Checkout ENVIADO | UID: {uid}")
+        logger.info(f"🔥 [CAPI] Checkout ENVIADO | UID: {uid} | Tracking: {'fbc' in user_data}")
     except Exception as e: logger.error(f"❌ Erro Checkout: {e}")
 
 def enviar_purchase_capi(uid: int, valor: float):
-    fbclid = r.get(f"fbclid:{uid}")
-    user_data = {"external_id": [hash_data(str(uid))]}
-    if fbclid:
-        user_data["fbc"] = [f"fb.1.{int(time.time())}.{fbclid}"]
+    user_data = montar_user_data(uid)
 
     payload = {
         "data": [{
@@ -105,26 +116,32 @@ def enviar_purchase_capi(uid: int, valor: float):
             "event_time": int(time.time()),
             "event_id": f"pur_{uid}_{int(time.time())}",
             "action_source": "chat",
-            "user_data": user_data,
+            "user_data": user_data, 
             "custom_data": {"value": valor, "currency": "BRL"}
         }],
         "access_token": ACCESS_TOKEN
     }
     try:
         requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
-        logger.info(f"💰 [CAPI] Purchase ENVIADO | UID: {uid} | R$ {valor} | FBCLID: {'Sim' if fbclid else 'Não'}")
+        logger.info(f"💰 [CAPI] Purchase ENVIADO | UID: {uid} | R$ {valor:.2f} | Tracking: {'fbc' in user_data}")
     except Exception as e: logger.error(f"❌ Erro Purchase: {e}")
 
 # ====================== HANDLERS ======================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    args = context.args # Pega os argumentos após o /start
+    args = context.args 
     
-    # Verifica se veio o fbclid no formato ?start=fbclid_VALOR
-    if args and args[0].startswith("fbclid_"):
-        fb_val = args[0].replace("fbclid_", "")
-        r.set(f"fbclid:{uid}", fb_val, ex=259200) # Salva por 3 dias
-        logger.info(f"📍 [TRACKING] FBCLID capturado para UID {uid}: {fb_val}")
+    if args:
+        payload = args[0]
+        if "fbp_" in payload:
+            fbp_val = payload.split("fbp_")[1].split("_fbc_")[0]
+            r.set(f"fbp:{uid}", fbp_val, ex=259200) 
+            logger.info(f"📍 [TRACKING] FBP capturado para UID {uid}")
+
+        if "fbc_" in payload:
+            fbc_val = payload.split("fbc_")[1]
+            r.set(f"fbclid:{uid}", fbc_val, ex=259200) 
+            logger.info(f"📍 [TRACKING] FBCLID capturado para UID {uid}")
 
     logger.info(f"👤 [BOT] /start recebido do UID: {uid}")
     enviar_lead_capi(uid, "start")
@@ -157,7 +174,7 @@ bot_loop = asyncio.new_event_loop()
 def run_bot():
     asyncio.set_event_loop(bot_loop)
     bot_loop.run_until_complete(application.initialize())
-    bot_loop.run_until_complete(application.start())
+    bot_loop.run_complete = application.start()
     bot_loop.run_forever()
 
 threading.Thread(target=run_bot, daemon=True).start()
