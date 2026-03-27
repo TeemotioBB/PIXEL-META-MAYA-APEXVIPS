@@ -1,4 +1,4 @@
-import os  # <-- ADICIONADO: Essencial para ler as env vars
+import os
 import logging
 import hashlib
 import time
@@ -16,7 +16,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ====================== CONFIGURAÇÃO ======================
-# Mantendo hardcoded conforme solicitado
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN_APEX")
 WEBHOOK_BASE_URL = "https://pixel-meta-maya-apexvips-production.up.railway.app"
 REDIS_URL = os.getenv("REDIS_URL")
@@ -30,40 +29,59 @@ def hash_data(value: str) -> str:
 r = None
 if REDIS_URL:
     try:
-        r = redis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=2)
+        r = redis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=5)
         r.ping()
-        logger.info("✅ Redis conectado!")
+        logger.info("✅ Redis conectado com sucesso!")
     except Exception as e:
-        logger.error(f"⚠️ Redis Offline: {e}")
+        logger.error(f"⚠️ Redis Offline ou Erro: {e}")
 
 # ====================== CAPI FUNCTIONS ======================
 
 def enviar_lead_capi(uid: int, trigger: str):
-    if not r: return
+    logger.info(f"📡 Tentando enviar CAPI Lead para {uid}...")
+    if not r:
+        logger.warning("⚠️ CAPI abortada: Sem conexão com Redis.")
+        return
+        
     try:
         redis_key = f"lead_sent:{uid}:{date.today()}"
-        if not r.set(redis_key, "1", ex=86400, nx=True): return
-        
+        # Se já existir no redis, avisamos no log mas não enviamos para o Meta
+        if r.exists(redis_key):
+            logger.info(f"⏭️ Lead já enviado hoje para {uid} (Ignorado para evitar duplicidade)")
+            return
+            
         payload = {
             "data": [{
                 "event_name": "Lead",
                 "event_time": int(time.time()),
-                "event_id": f"lead_{uid}_{date.today()}",
+                "event_id": f"lead_{uid}_{int(time.time())}", # ID único por segundo
                 "action_source": "chat",
                 "user_data": {"external_id": [hash_data(str(uid))]},
                 "custom_data": {"trigger": trigger}
             }],
             "access_token": ACCESS_TOKEN
         }
-        resp = requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=5)
-        logger.info(f"📡 CAPI Lead: {resp.status_code}")
+        
+        url = f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events"
+        resp = requests.post(url, json=payload, timeout=10)
+        
+        if resp.status_code == 200:
+            r.set(redis_key, "1", ex=86400) # Salva no redis só após o sucesso
+            logger.info(f"✅ CAPI Lead Enviado: Status 200 OK")
+        else:
+            logger.error(f"❌ Erro CAPI Meta ({resp.status_code}): {resp.text}")
+            
     except Exception as e:
-        logger.error(f"❌ Erro CAPI Lead: {e}")
+        logger.error(f"💥 Falha na função enviar_lead_capi: {e}")
 
 def enviar_purchase_capi(uid: int, valor: float, transaction_id: str):
+    logger.info(f"💰 Processando CAPI Purchase para {uid} | Valor: {valor}")
     try:
-        if r and not r.set(f"pur_sent:{transaction_id}", "1", ex=604800, nx=True): return
-        
+        if r:
+            if r.exists(f"pur_sent:{transaction_id}"):
+                logger.info(f"⏭️ Purchase {transaction_id} já enviada anteriormente.")
+                return
+
         payload = {
             "data": [{
                 "event_name": "Purchase",
@@ -75,18 +93,28 @@ def enviar_purchase_capi(uid: int, valor: float, transaction_id: str):
             }],
             "access_token": ACCESS_TOKEN
         }
-        resp = requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=5)
-        logger.info(f"💰 CAPI Purchase: {resp.status_code}")
+        
+        url = f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events"
+        resp = requests.post(url, json=payload, timeout=10)
+        
+        if resp.status_code == 200:
+            if r: r.set(f"pur_sent:{transaction_id}", "1", ex=604800)
+            logger.info(f"✅ CAPI Purchase Enviada: Status 200 OK")
+        else:
+            logger.error(f"❌ Erro CAPI Purchase ({resp.status_code}): {resp.text}")
+            
     except Exception as e:
-        logger.error(f"❌ Erro CAPI Purchase: {e}")
+        logger.error(f"💥 Falha na função enviar_purchase_capi: {e}")
 
 # ====================== HANDLERS ======================
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    logger.info(f"👤 [BOT] /start de {uid}")
-    # Envia lead automaticamente no /start
-    enviar_lead_capi(uid, "bot_start")
+    logger.info(f"🚀 [COMANDO RECEBIDO] /start do usuário: {uid}")
+    
+    # Chama a CAPI de forma assíncrona para não travar o bot
+    threading.Thread(target=enviar_lead_capi, args=(uid, "start_bot"), daemon=True).start()
+    
     await update.message.reply_text(
         "👋 Bem-vindo! Se você já realizou o pagamento, aguarde alguns instantes para a liberação do seu acesso."
     )
@@ -105,11 +133,10 @@ bot_ready = threading.Event()
 
 def run_bot_init():
     asyncio.set_event_loop(bot_loop)
-    # Inicialização completa antes de rodar o loop forever
     bot_loop.run_until_complete(application.initialize())
     bot_loop.run_until_complete(application.start())
     bot_ready.set()
-    logger.info("✅ Bot inicializado e pronto.")
+    logger.info("🤖 Bot configurado e loop iniciado.")
     bot_loop.run_forever()
 
 threading.Thread(target=run_bot_init, daemon=True).start()
@@ -120,11 +147,12 @@ threading.Thread(target=run_bot_init, daemon=True).start()
 def telegram_webhook():
     try:
         data = request.get_json()
+        logger.info(f"📩 Webhook recebido do Telegram") # LOG DE ENTRADA
         if data:
             update = Update.de_json(data, application.bot)
             asyncio.run_coroutine_threadsafe(application.process_update(update), bot_loop)
     except Exception as e:
-        logger.error(f"Erro no webhook Telegram: {e}")
+        logger.error(f"❌ Erro processando webhook: {e}")
     return "ok", 200
 
 @app.route('/apex-webhook', methods=['POST'])
@@ -134,8 +162,9 @@ def apex_webhook():
     uid = data.get("customer", {}).get("chat_id")
     transaction = data.get("transaction", {})
     t_id = transaction.get("id")
-    # Pequena correção na lógica do valor (evitar divisão por zero se vazio)
     val_raw = float(transaction.get("plan_value") or 0) / 100
+
+    logger.info(f"📢 Apex Webhook: Evento={evento} | ChatID={uid}")
 
     if not uid:
         return "ok", 200
@@ -146,11 +175,10 @@ def apex_webhook():
         async def send_msg():
             try:
                 msg = "🚀 *Seu acesso VIP foi liberado!*\n\nClique no botão abaixo para entrar agora."
-                # Lembre-se de trocar o link abaixo pelo seu real
                 kb = InlineKeyboardMarkup([[InlineKeyboardButton("Entrar no VIP 💎", url="https://t.me/+SEU_LINK_AQUI")]])
                 await application.bot.send_message(chat_id=uid, text=msg, reply_markup=kb, parse_mode="Markdown")
             except Exception as e:
-                logger.error(f"Erro ao enviar msg VIP: {e}")
+                logger.error(f"❌ Erro ao enviar msg VIP: {e}")
 
         asyncio.run_coroutine_threadsafe(send_msg(), bot_loop)
 
@@ -158,8 +186,8 @@ def apex_webhook():
 
 @app.route("/set-webhook", methods=["GET"])
 def set_webhook():
-    if not bot_ready.wait(timeout=20):
-        return "❌ Bot ainda não inicializou.", 503
+    if not bot_ready.wait(timeout=30):
+        return "❌ Bot não inicializou a tempo.", 503
 
     url = f"{WEBHOOK_BASE_URL.rstrip('/')}/webhook"
 
@@ -169,17 +197,15 @@ def set_webhook():
 
     try:
         future = asyncio.run_coroutine_threadsafe(setup(), bot_loop)
-        res = future.result(timeout=15)
-        return f"✅ Webhook configurado: {url} | Resultado: {res}", 200
+        res = future.result(timeout=20)
+        return f"✅ Webhook Configurado! URL: {url}", 200
     except Exception as e:
-        return f"❌ Erro: {e}", 500
+        return f"❌ Falha: {e}", 500
 
 @app.route("/", methods=["GET"])
 def home():
-    status = "pronto" if bot_ready.is_set() else "inicializando..."
-    return f"Bot Online! Status: {status}", 200
+    return f"Bot Ativo! Status: {'Pronto' if bot_ready.is_set() else 'Iniciando...'}", 200
 
 if __name__ == "__main__":
-    # Railway define a porta automaticamente na env var PORT
     port = int(os.getenv("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
