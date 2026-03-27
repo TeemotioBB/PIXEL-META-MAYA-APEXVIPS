@@ -21,7 +21,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN_APEX")
 REDIS_URL = os.getenv("REDIS_URL")
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL")
 PIXEL_ID = "735253462874774"
-ACCESS_TOKEN = "EAANRM9QJv7YBRG54vW9VkOT3rgEQDry9PA2UzN7HsdauowZBDKZB0e1MtvZBvUuUSc9Ub2I96psCQTl0PZBRoIG7ElDCyMU7uO2idnf0nrebj4u3f7ZA396AGXCrBZC4NljW8OURxBu4qi5zGFZBEaWVtqlfwdZCoqGFeJ238YqE86c2tfwjdjBBJ52xLX3xZCh1sqwZDZD"
+ACCESS_TOKEN = "EAANRM9QJv7YBRG54vW9VkOT3rgEQDry96psCQTl0PZBRoIG7ElDCyMU7uO2idnf0nrebj4u3f7ZA396AGXCrBZC4NljW8OURxBu4qi5zGFZBEaWVtqlfwdZCoqGFeJ238YqE86c2tfwjdjBBJ52xLX3xZCh1sqwZDZD"
 
 def hash_data(value: str) -> str:
     return hashlib.sha256(value.strip().lower().encode("utf-8")).hexdigest()
@@ -39,38 +39,51 @@ except Exception as e:
 def enviar_lead_capi(uid: int, trigger: str):
     redis_key = f"lead_sent:{uid}:{date.today()}"
     if r.exists(redis_key):
-        logger.info(f"⚠️ [CAPI] Lead para {uid} já enviado hoje (Filtro Ativo).")
+        logger.info(f"⚠️ [CAPI] Lead para {uid} já enviado hoje.")
         return
     r.set(redis_key, "1", ex=86400)
+
+    # Tenta recuperar o fbclid do Redis (salvo no /start)
+    fbclid = r.get(f"fbclid:{uid}")
+    
+    user_data = {"external_id": [hash_data(str(uid))]}
+    if fbclid:
+        user_data["fbc"] = [f"fb.1.{int(time.time())}.{fbclid}"]
+
     payload = {
         "data": [{
             "event_name": "Lead",
             "event_time": int(time.time()),
             "event_id": f"lead_{uid}_{date.today()}",
             "action_source": "chat",
-            "user_data": {"external_id": [hash_data(str(uid))]},
+            "user_data": user_data,
             "custom_data": {"trigger": trigger}
         }],
         "access_token": ACCESS_TOKEN
     }
     try:
         requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
-        logger.info(f"🟢 [CAPI] Lead ENVIADO | UID: {uid} | Trigger: {trigger}")
+        logger.info(f"🟢 [CAPI] Lead ENVIADO | UID: {uid} | FBCLID: {'Sim' if fbclid else 'Não'}")
     except Exception as e: logger.error(f"❌ Erro Lead: {e}")
 
 def enviar_initiatecheckout_capi(uid: int):
     redis_key = f"checkout_sent:{uid}"
     if r.exists(redis_key):
-        logger.info(f"⚠️ [CAPI] Checkout para {uid} ignorado (Já enviado na última 1h).")
         return
     r.set(redis_key, "1", ex=3600)
+    
+    fbclid = r.get(f"fbclid:{uid}")
+    user_data = {"external_id": [hash_data(str(uid))]}
+    if fbclid:
+        user_data["fbc"] = [f"fb.1.{int(time.time())}.{fbclid}"]
+
     payload = {
         "data": [{
             "event_name": "InitiateCheckout",
             "event_time": int(time.time()),
             "event_id": f"init_{uid}_{int(time.time())}",
             "action_source": "chat",
-            "user_data": {"external_id": [hash_data(str(uid))]},
+            "user_data": user_data,
             "custom_data": {"currency": "BRL", "value": 0.00}
         }],
         "access_token": ACCESS_TOKEN
@@ -81,25 +94,38 @@ def enviar_initiatecheckout_capi(uid: int):
     except Exception as e: logger.error(f"❌ Erro Checkout: {e}")
 
 def enviar_purchase_capi(uid: int, valor: float):
+    fbclid = r.get(f"fbclid:{uid}")
+    user_data = {"external_id": [hash_data(str(uid))]}
+    if fbclid:
+        user_data["fbc"] = [f"fb.1.{int(time.time())}.{fbclid}"]
+
     payload = {
         "data": [{
             "event_name": "Purchase",
             "event_time": int(time.time()),
             "event_id": f"pur_{uid}_{int(time.time())}",
             "action_source": "chat",
-            "user_data": {"external_id": [hash_data(str(uid))]},
+            "user_data": user_data,
             "custom_data": {"value": valor, "currency": "BRL"}
         }],
         "access_token": ACCESS_TOKEN
     }
     try:
         requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
-        logger.info(f"💰 [CAPI] Purchase ENVIADO | UID: {uid} | R$ {valor}")
+        logger.info(f"💰 [CAPI] Purchase ENVIADO | UID: {uid} | R$ {valor} | FBCLID: {'Sim' if fbclid else 'Não'}")
     except Exception as e: logger.error(f"❌ Erro Purchase: {e}")
 
 # ====================== HANDLERS ======================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+    args = context.args # Pega os argumentos após o /start
+    
+    # Verifica se veio o fbclid no formato ?start=fbclid_VALOR
+    if args and args[0].startswith("fbclid_"):
+        fb_val = args[0].replace("fbclid_", "")
+        r.set(f"fbclid:{uid}", fb_val, ex=259200) # Salva por 3 dias
+        logger.info(f"📍 [TRACKING] FBCLID capturado para UID {uid}: {fb_val}")
+
     logger.info(f"👤 [BOT] /start recebido do UID: {uid}")
     enviar_lead_capi(uid, "start")
 
@@ -108,7 +134,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = query.from_user.id
     await query.answer()
     cb_data = (query.data or "").lower()
-    logger.info(f"🖱️ [BOT] Clique detectado: {cb_data}")
     enviar_lead_capi(uid, "button_click")
     if any(x in cb_data for x in ["plan", "buy", "pix", "pay"]):
         enviar_initiatecheckout_capi(uid)
@@ -124,7 +149,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 app = Flask(__name__)
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-# Registrar Handlers antes de tudo
 application.add_handler(CommandHandler("start", start_handler))
 application.add_handler(CallbackQueryHandler(button_handler))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
