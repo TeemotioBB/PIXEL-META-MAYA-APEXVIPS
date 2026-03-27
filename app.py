@@ -139,21 +139,18 @@ def run_bot():
 
 threading.Thread(target=run_bot, daemon=True).start()
 
-@app.route("/", methods=["GET"])
-def home(): return "Tracker Online", 200
-
-# ====================== ROUTES (Coloque Aqui) ======================
+# ====================== ROUTES ======================
 
 @app.route("/set-webhook", methods=["GET"])
 def set_webhook():
-    # Garante que a URL termine corretamente para o Telegram
+    if not WEBHOOK_BASE_URL:
+        return "❌ Erro: WEBHOOK_BASE_URL não configurada nas variáveis de ambiente.", 500
+        
     url = f"{WEBHOOK_BASE_URL.rstrip('/')}/webhook"
     try:
-        # O drop_pending_updates=True limpa o lixo de mensagens antigas
         async def s(): 
             await application.bot.set_webhook(url, drop_pending_updates=True)
         
-        # Envia o comando para o loop do bot que está rodando em outra thread
         asyncio.run_coroutine_threadsafe(s(), bot_loop).result()
         return f"✅ Webhook configurado com sucesso: {url}", 200
     except Exception as e:
@@ -162,7 +159,8 @@ def set_webhook():
 
 @app.route("/", methods=["GET"])
 def home(): 
-    return "Tracker Online", 200
+    return "Tracker Online - Rastreio Meta CAPI Ativo", 200
 
 if __name__ == "__main__":
+    # O port 8080 é padrão para Render/Heroku/Railway
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
