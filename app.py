@@ -176,26 +176,42 @@ def telegram_webhook():
 
 @app.route('/apex-webhook', methods=['POST', 'GET'])
 def apex_webhook():
-    # Loga headers para diagnóstico (útil para ver tokens de autenticação da Apex)
     logger.info(f"📢 [APEX] Headers: {dict(request.headers)}")
-
-    # Aceita JSON, form-data ou query params (cada plataforma manda de um jeito)
     data = request.get_json(silent=True) or request.form.to_dict() or {}
-
-    # Log do payload completo da Apex para diagnóstico
     logger.info(f"📢 [APEX] Payload recebido: {data}")
 
     evento = data.get("event")
-    uid = data.get("customer", {}).get("chat_id")
+    customer = data.get("customer", {})
+    uid = customer.get("chat_id")
+    
     transaction = data.get("transaction", {})
-    t_id = transaction.get("id")
+    # A Apex usa 'internal_transaction_id' ou 'external_transaction_id'
+    t_id = transaction.get("internal_transaction_id") or transaction.get("id")
     plan_value = transaction.get("plan_value")
 
     logger.info(f"📢 [APEX] Evento={evento} | uid={uid} | transaction_id={t_id} | plan_value={plan_value}")
 
     if not uid:
-        logger.warning(f"⚠️ [APEX] chat_id ausente no payload — ignorando evento={evento}")
+        logger.warning(f"⚠️ [APEX] chat_id ausente — ignorando evento={evento}")
         return {"status": "ok"}, 200
+
+    # --- MAPEAMENTO CORRIGIDO ---
+
+    # 1. Quando o usuário entra no bot ou inicia checkout
+    if evento in ["user_joined", "checkout_created", "payment_created"]:
+        logger.info(f"🛒 [APEX] Enviando InitiateCheckout para uid={uid}")
+        enviar_evento_capi_async(uid, "InitiateCheckout")
+
+    # 2. Quando o pagamento é aprovado
+    elif evento in ["payment_approved", "sale_approved"]:
+        val = float(plan_value or 0) / 100
+        logger.info(f"💰 [APEX] Enviando Purchase para uid={uid} | valor=R${val:.2f}")
+        enviar_evento_capi_async(uid, "Purchase", {"value": val, "currency": "BRL"}, f"pur_{t_id}")
+
+    else:
+        logger.info(f"ℹ️ [APEX] Evento ignorado (não configurado para Meta): {evento}")
+
+    return {"status": "ok"}, 200
 
     # 1. INITIATE CHECKOUT
     if evento == "checkout_created":
