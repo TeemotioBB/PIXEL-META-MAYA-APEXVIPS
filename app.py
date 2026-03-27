@@ -39,6 +39,7 @@ except Exception as e:
 def enviar_lead_capi(uid: int, trigger: str):
     redis_key = f"lead_sent:{uid}:{date.today()}"
     if r.exists(redis_key):
+        logger.info(f"⚠️ [CAPI] Lead para {uid} já enviado hoje (Filtro Ativo).")
         return
     r.set(redis_key, "1", ex=86400)
     payload = {
@@ -58,10 +59,9 @@ def enviar_lead_capi(uid: int, trigger: str):
     except Exception as e: logger.error(f"❌ Erro Lead: {e}")
 
 def enviar_initiatecheckout_capi(uid: int):
-    # Trava de 1 hora para não repetir o checkout do mesmo usuário
     redis_key = f"checkout_sent:{uid}"
     if r.exists(redis_key):
-        logger.info(f"⚠️ [CAPI] Checkout para {uid} ignorado (Já enviado recentemente).")
+        logger.info(f"⚠️ [CAPI] Checkout para {uid} ignorado (Já enviado na última 1h).")
         return
     r.set(redis_key, "1", ex=3600)
     payload = {
@@ -71,7 +71,7 @@ def enviar_initiatecheckout_capi(uid: int):
             "event_id": f"init_{uid}_{int(time.time())}",
             "action_source": "chat",
             "user_data": {"external_id": [hash_data(str(uid))]},
-            "custom_data": {"currency": "BRL", "value": 12.90} 
+            "custom_data": {"currency": "BRL", "value": 12.90}
         }],
         "access_token": ACCESS_TOKEN
     }
@@ -102,30 +102,29 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     logger.info(f"👤 [BOT] /start recebido do UID: {uid}")
     enviar_lead_capi(uid, "start")
-    await update.message.reply_text("👋 Bem-vindo! Se você já realizou o pagamento, aguarde alguns instantes para a liberação do seu acesso.")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = query.from_user.id
     await query.answer()
     cb_data = (query.data or "").lower()
-    
-    # Registra que o usuário interagiu (Lead)
-    enviar_lead_capi(uid, f"btn_{cb_data}")
-    
-    # SE O BOTÃO TIVER PALAVRAS DE COMPRA, MANDA CHECKOUT
-    if any(x in cb_data for x in ["plan", "buy", "pix", "pay", "assinar", "comprar"]):
+    logger.info(f"🖱️ [BOT] Clique detectado: {cb_data}")
+    enviar_lead_capi(uid, "button_click")
+    if any(x in cb_data for x in ["plan", "buy", "pix", "pay"]):
         enviar_initiatecheckout_capi(uid)
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = (update.message.text or "").lower()
-    enviar_lead_capi(uid, "chat_msg")
+    enviar_lead_capi(uid, "chat")
+    if "pagar com pix" in text or "plano selecionado" in text:
+        enviar_initiatecheckout_capi(uid)
 
 # ====================== ENGINE ======================
 app = Flask(__name__)
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 
+# Registrar Handlers antes de tudo
 application.add_handler(CommandHandler("start", start_handler))
 application.add_handler(CallbackQueryHandler(button_handler))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
@@ -157,20 +156,11 @@ def apex_webhook():
     data = request.get_json() or {}
     evento = data.get("event")
     uid = data.get("customer", {}).get("chat_id")
-    transaction = data.get("transaction", {})
-    val_raw = transaction.get("plan_value", 0)
-
+    val_raw = data.get("transaction", {}).get("plan_value", 0)
     if not uid: return "ok", 200
-
-    if evento == "user_joined": 
-        enviar_lead_capi(uid, "apex_joined")
-    elif evento == "payment_created": 
-        # Rastreia o checkout assim que o PIX/Boleto é gerado no sistema
-        enviar_initiatecheckout_capi(uid)
-    elif evento == "payment_approved": 
-        # Rastreia a venda finalizada
-        enviar_purchase_capi(uid, float(val_raw)/100)
-
+    if evento == "user_joined": enviar_lead_capi(uid, "apex_joined")
+    elif evento == "payment_created": enviar_initiatecheckout_capi(uid)
+    elif evento == "payment_approved": enviar_purchase_capi(uid, float(val_raw)/100)
     return "ok", 200
 
 @app.route("/set-webhook", methods=["GET"])
@@ -183,7 +173,7 @@ def set_webhook():
     except Exception as e: return str(e), 500
 
 @app.route("/", methods=["GET"])
-def home(): return "Bot Online e Rastreando!", 200
+def home(): return "Bot Online", 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
