@@ -8,7 +8,7 @@ import requests
 import redis
 from datetime import date
 from flask import Flask, request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # ====================== LOGGING ======================
@@ -83,7 +83,6 @@ def enviar_evento_capi(uid: int, event_name: str, custom_data=None, event_id=Non
                 logger.info(f"✅ [CAPI] Evento ACEITO pelo Meta | evento={event_name} uid={uid} events_received={events_received}")
                 return True
             else:
-                # Pode ter "error" ou "messages" com warnings
                 messages = resp_json.get("messages", [])
                 errors = resp_json.get("error", {})
                 logger.error(
@@ -132,7 +131,6 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             logger.info(f"⏭️ [REDIS] Lead duplicado bloqueado para uid={uid} (chave: {redis_key})")
     else:
-        # Sem Redis: envia sempre e alerta
         logger.warning(f"⚠️ [LEAD] Redis indisponível — enviando Lead sem trava | uid={uid}")
         enviar_evento_capi_async(uid, "Lead")
 
@@ -175,9 +173,13 @@ def telegram_webhook():
     return "ok", 200
 
 
-@app.route('/apex-webhook', methods=['POST'])
+@app.route('/apex-webhook', methods=['POST', 'GET'])
 def apex_webhook():
-    data = request.get_json() or {}
+    # Loga headers para diagnóstico (útil para ver tokens de autenticação da Apex)
+    logger.info(f"📢 [APEX] Headers: {dict(request.headers)}")
+
+    # Aceita JSON, form-data ou query params (cada plataforma manda de um jeito)
+    data = request.get_json(silent=True) or request.form.to_dict() or {}
 
     # Log do payload completo da Apex para diagnóstico
     logger.info(f"📢 [APEX] Payload recebido: {data}")
@@ -192,34 +194,23 @@ def apex_webhook():
 
     if not uid:
         logger.warning(f"⚠️ [APEX] chat_id ausente no payload — ignorando evento={evento}")
-        return "ok", 200
+        return {"status": "ok"}, 200
 
     # 1. INITIATE CHECKOUT
     if evento == "checkout_created":
         logger.info(f"🛒 [APEX] InitiateCheckout para uid={uid}")
         enviar_evento_capi_async(uid, "InitiateCheckout")
 
-    # 2. PURCHASE
+    # 2. PURCHASE — apenas rastreia no pixel, entrega é responsabilidade da Apex
     elif evento == "payment_approved":
         val = float(plan_value or 0) / 100
         logger.info(f"💰 [APEX] Purchase para uid={uid} | valor=R${val:.2f} | event_id=pur_{t_id}")
         enviar_evento_capi_async(uid, "Purchase", {"value": val, "currency": "BRL"}, f"pur_{t_id}")
 
-        async def send_vip():
-            try:
-                msg = "🚀 *Seu acesso VIP foi liberado!*\n\nClique abaixo para entrar."
-                kb = InlineKeyboardMarkup([[InlineKeyboardButton("Entrar no VIP 💎", url="https://t.me/+SEU_LINK_AQUI")]])
-                await application.bot.send_message(chat_id=uid, text=msg, reply_markup=kb, parse_mode="Markdown")
-                logger.info(f"✅ [BOT] Mensagem VIP enviada para uid={uid}")
-            except Exception as e:
-                logger.error(f"❌ [BOT] Falha ao enviar mensagem VIP para uid={uid}: {e}")
-
-        asyncio.run_coroutine_threadsafe(send_vip(), bot_loop)
-
     else:
         logger.info(f"ℹ️ [APEX] Evento não mapeado: {evento} | uid={uid}")
 
-    return "ok", 200
+    return {"status": "ok"}, 200
 
 
 @app.route("/set-webhook", methods=["GET"])
