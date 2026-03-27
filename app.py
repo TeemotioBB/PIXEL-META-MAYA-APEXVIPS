@@ -107,14 +107,28 @@ def telegram_webhook():
 @app.route('/apex-webhook', methods=['POST'])
 def apex_webhook():
     data = request.get_json() or {}
+    # Este log abaixo vai mostrar TUDO que a Apex mandar, sem filtros:
+    logger.info(f"📥 [DEBUG APEX] Dados recebidos: {data}")
+    
     evento = data.get("event")
     uid = data.get("customer", {}).get("chat_id")
-    transaction = data.get("transaction", {})
-    t_id = transaction.get("id")
     
-    logger.info(f"📢 [APEX] Evento: {evento} | Usuário: {uid}")
+    if not uid: 
+        logger.warning("⚠️ Webhook recebido sem chat_id de cliente.")
+        return "ok", 200
 
-    if not uid: return "ok", 200
+    # Se o evento for de checkout (ajuste o nome se o log mostrar outro)
+    if evento in ["checkout_created", "bill_created", "checkout_initiated"]:
+        enviar_evento_capi(uid, "InitiateCheckout")
+
+    elif evento == "payment_approved":
+        transaction = data.get("transaction", {})
+        t_id = transaction.get("id")
+        val = float(transaction.get("plan_value") or 0) / 100
+        enviar_evento_capi(uid, "Purchase", {"value": val, "currency": "BRL"}, f"pur_{t_id}")
+        # ... resto do código de envio de mensagem ...
+
+    return "ok", 200
 
     # 1. INITIATE CHECKOUT (Quando o cliente abre o checkout na Apex)
     if evento == "checkout_created": # Verifique se o nome do evento na Apex é esse mesmo
