@@ -58,6 +58,7 @@ def enviar_evento_capi(uid: int, event_name: str, custom_data=None, event_id=Non
             "action_source": "chat",
             "user_data": {"external_id": [hash_data(str(uid))]},
             "custom_data": custom_data or {}
+            "test_event_code": "TEST22278"  # <--- COLOQUE EXATAMENTE AQUI
         }],
         "access_token": ACCESS_TOKEN
     }
