@@ -52,6 +52,7 @@ def enviar_evento_capi(uid: int, event_name: str, custom_data=None, event_id=Non
             },
             "custom_data": custom_data or {},
         }],
+        "test_event_code": "TEST22278", # <-- POSIÇÃO CORRETA (FORA DO DATA)
         "access_token": ACCESS_TOKEN
     }
 
@@ -60,8 +61,8 @@ def enviar_evento_capi(uid: int, event_name: str, custom_data=None, event_id=Non
         resp = requests.post(url, json=payload, timeout=10)
         resp_json = resp.json()
         
-        if resp.status_code == 200 and resp_json.get("events_received", 0) > 0:
-            logger.info(f"✅ [CAPI] Evento {event_name} ACEITO | uid={uid}")
+        if resp.status_code == 200:
+            logger.info(f"✅ [CAPI] Evento {event_name} ACEITO pelo Meta | uid={uid}")
             return True
         else:
             logger.error(f"❌ [CAPI] Evento REJEITADO | erro: {resp_json}")
@@ -81,10 +82,10 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- BLOCO COMENTADO PARA PERMITIR TESTES REPETIDOS ---
     # redis_key = f"lead_sent:{uid}:{date.today()}"
     # if r and not r.exists(redis_key):
-    #     r.set(redis_key, "1", ex=86400)
-    #     enviar_evento_capi_async(uid, "Lead")
+    #      r.set(redis_key, "1", ex=86400)
+    #      enviar_evento_capi_async(uid, "Lead")
     # elif not r:
-    #     enviar_evento_capi_async(uid, "Lead")
+    #      enviar_evento_capi_async(uid, "Lead")
     # ----------------------------------------------------
 
     # ENVIO DIRETO (DISPARA TODA VEZ QUE VOCÊ DER /START)
@@ -116,9 +117,8 @@ def telegram_webhook():
         asyncio.run_coroutine_threadsafe(application.process_update(update), bot_loop)
     return "ok", 200
 
-@app.route('/apex-webhook', methods=['POST', 'GET']) # Adicionado 'GET' aqui
+@app.route('/apex-webhook', methods=['POST', 'GET'])
 def apex_webhook():
-    # Se for apenas um teste da Apex (GET), responde OK
     if request.method == 'GET':
         return {"status": "ok", "message": "Endpoint ativo"}, 200
 
@@ -142,6 +142,7 @@ def apex_webhook():
 
     # 1. INICIAR CHECKOUT
     if evento in ["user_joined", "payment_created", "checkout_created"]:
+        logger.info(f"🛒 [APEX] Enviando InitiateCheckout (0.00) | uid={uid}")
         enviar_evento_capi_async(uid, "InitiateCheckout", {
             "value": 0.00,
             "currency": "BRL",
@@ -151,29 +152,7 @@ def apex_webhook():
 
     # 2. COMPRA APROVADA
     elif evento in ["payment_approved", "sale_approved"]:
-        enviar_evento_capi_async(uid, "Purchase", {
-            "value": valor_real,
-            "currency": "BRL",
-            "content_name": plan_name,
-            "content_type": "product",
-            "num_items": 1
-        }, f"pur_{t_id}")
-
-    return {"status": "ok"}, 200
-
-    # 1. INICIAR CHECKOUT (Valor fixo 0.00 conforme pedido)
-    if evento in ["user_joined", "payment_created", "checkout_created"]:
-        logger.info(f"🛒 [APEX] Iniciando Checkout (0.00) para uid={uid}")
-        enviar_evento_capi_async(uid, "InitiateCheckout", {
-            "value": 0.00,
-            "currency": "BRL",
-            "content_name": plan_name,
-            "content_type": "product"
-        })
-
-    # 2. COMPRA APROVADA (Valor real pago)
-    elif evento in ["payment_approved", "sale_approved"]:
-        logger.info(f"💰 [APEX] Compra Real Aprovada: R${valor_real:.2f} para uid={uid}")
+        logger.info(f"💰 [APEX] Enviando Purchase (R${valor_real:.2f}) | uid={uid}")
         enviar_evento_capi_async(uid, "Purchase", {
             "value": valor_real,
             "currency": "BRL",
