@@ -38,24 +38,30 @@ except Exception as e:
 def montar_user_data(uid):
     """Busca dados no Redis e monta o dicionário user_data para a Meta"""
     user_data = {"external_id": [hash_data(str(uid))]}
-    
+
     fbp = r.get(f"fbp:{uid}")
     fbc_raw = r.get(f"fbclid:{uid}")
-    
+
+    logger.info(f"[montar_user_data] UID {uid} → FBP encontrado: {bool(fbp)} | FBC encontrado: {bool(fbc_raw)}")
+
     if fbp:
         user_data["fbp"] = [fbp]
-    
+        logger.info(f"[montar_user_data] FBP incluído → {fbp[:50]}...")
+
     if fbc_raw:
-        # Formato oficial: fb.1.TEMPO.VALOR
-        user_data["fbc"] = [f"fb.1.{int(time.time())}.{fbc_raw}"]
-    
+        # Formata corretamente conforme documentação oficial do Meta
+        creation_time = int(time.time() * 1000)  # milissegundos
+        fbc_formatted = f"fb.1.{creation_time}.{fbc_raw}"
+        user_data["fbc"] = [fbc_formatted]
+        logger.info(f"[montar_user_data] FBC formatado e incluído → {fbc_formatted[:100]}...")
+
     try:
         ua = request.headers.get('User-Agent', 'TelegramBot/1.0')
     except Exception:
         ua = 'TelegramBot/1.0'
-    
+
     user_data["client_user_agent"] = [ua]
-    
+
     return user_data
 
 # ====================== CAPI FUNCTIONS ======================
@@ -129,22 +135,39 @@ def enviar_purchase_capi(uid: int, valor: float):
 # ====================== HANDLERS ======================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    args = context.args 
-    
-    if args:
-        payload = args[0]
-        if "fbp_" in payload:
-            fbp_val = payload.split("fbp_")[1].split("_fbc_")[0]
-            r.set(f"fbp:{uid}", fbp_val, ex=259200) 
-            logger.info(f"📍 [TRACKING] FBP capturado para UID {uid}")
+    args = context.args
+    payload = " ".join(args) if args else ""
 
-        if "fbc_" in payload:
-            fbc_val = payload.split("fbc_")[1]
-            r.set(f"fbclid:{uid}", fbc_val, ex=259200) 
-            logger.info(f"📍 [TRACKING] FBCLID capturado para UID {uid}")
+    logger.info(f"[START] UID: {uid} | Payload recebido: {payload}")
 
-    logger.info(f"👤 [BOT] /start recebido do UID: {uid}")
+    saved_fbp = False
+    saved_fbc = False
+
+    if payload:
+        try:
+            # Parsing mais robusto (aceita fbp_ e fbc_)
+            if "fbp_" in payload:
+                fbp_part = payload.split("fbp_")[1]
+                fbp_val = fbp_part.split("_fbc_")[0] if "_fbc_" in fbp_part else fbp_part
+                r.set(f"fbp:{uid}", fbp_val.strip(), ex=259200)
+                logger.info(f"✅ FBP salvo para UID {uid} | {fbp_val[:60]}...")
+                saved_fbp = True
+
+            if "fbc_" in payload:
+                fbc_val = payload.split("fbc_")[-1].strip()
+                r.set(f"fbclid:{uid}", fbc_val, ex=259200)
+                logger.info(f"✅ FBC salvo (raw) para UID {uid} | {fbc_val[:80]}...")
+                saved_fbc = True
+
+        except Exception as e:
+            logger.error(f"❌ Erro ao processar parâmetros do start: {e}")
+
+    # Delay pequeno para Redis processar
+    await asyncio.sleep(0.4)
+
     enviar_lead_capi(uid, "start")
+
+    logger.info(f"[START] Finalizado UID {uid} | FBP salvo: {saved_fbp} | FBC salvo: {saved_fbc}")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
