@@ -95,17 +95,6 @@ def enviar_purchase_capi(uid: int, valor: float, transaction_id: str):
 
 # ====================== HANDLERS ======================
 
-async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-
-    # ✅ FIX 2: Trava de 5s por usuário — bloqueia double-start do mesmo uid
-    if not r.set(f"start_lock:{uid}", "1", ex=5, nx=True):
-        logger.info(f"⚠️ [START] Duplicata bloqueada para uid={uid}")
-        return
-
-    logger.info(f"👤 [BOT] /start recebido: {uid}")
-    # Coloque aqui o restante da sua lógica do /start (mensagem de boas-vindas, etc.)
-
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = query.from_user.id
@@ -121,7 +110,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ====================== ENGINE & ROUTES ======================
 app = Flask(__name__)
 application = Application.builder().token(TELEGRAM_TOKEN).build()
-application.add_handler(CommandHandler("start", start_handler))
 application.add_handler(CallbackQueryHandler(button_handler))
 
 bot_loop = asyncio.new_event_loop()
