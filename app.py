@@ -11,16 +11,10 @@ from flask import Flask, request
 from telegram import Update
 from telegram.ext import Application, CallbackQueryHandler, ContextTypes
 
-# ====================== CONFIGURAÇÕES DE LOGGING ======================
-# Forçamos o flush para garantir que o Railway mostre o log em tempo real
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    force=True 
-)
+# ====================== CONFIGURAÇÕES ======================
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Variáveis de Ambiente
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN_APEX")
 REDIS_URL = os.getenv("REDIS_URL")
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL")
@@ -30,21 +24,21 @@ ACCESS_TOKEN = "EAANRM9QJv7YBRG54vW9VkOT3rgEQDry9PA2UzN7HsdauowZBDKZB0e1MtvZBvUu
 def hash_data(value: str) -> str:
     return hashlib.sha256(value.strip().lower().encode("utf-8")).hexdigest()
 
-# Conexão Redis com Log de Verificação
 try:
     r = redis.from_url(REDIS_URL, decode_responses=True)
     r.ping()
-    logger.info("✅ Conectado ao Redis com sucesso.")
+    logger.info("✅ Conectado ao Redis para controle de rastreio.")
 except Exception as e:
-    logger.error(f"❌ Erro Crítico no Redis: {e}")
-    # Não levantamos Exception aqui para o Flask não crashar no boot, 
-    # mas o app terá problemas se o Redis estiver offline.
+    logger.error(f"❌ Erro Redis: {e}")
+    raise
 
 # ====================== LOGICA DE RASTREIO CAPI ======================
 
 def enviar_evento_meta(uid: int, event_name: str, event_id: str, value: float = 0.0, trigger: str = None):
-    """Envia o evento para a API de Conversões da Meta com debug detalhado."""
+    """Envia o evento para a API de Conversões da Meta."""
+    # User Data básico (External ID é o mais forte no Telegram)
     user_data = {"external_id": [hash_data(str(uid))]}
+    
     custom_data = {"currency": "BRL", "value": value}
     if trigger:
         custom_data["trigger"] = trigger
@@ -63,131 +57,112 @@ def enviar_evento_meta(uid: int, event_name: str, event_id: str, value: float = 
     
     try:
         url = f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events"
-        response = requests.post(url, json=payload, timeout=10)
-        res_data = response.json()
-        
-        if response.status_code == 200:
-            logger.info(f"🚀 [META CAPI] Sucesso: {event_name} | UID: {uid} | ID: {event_id}")
-        else:
-            logger.warning(f"⚠️ [META CAPI] Erro da API ({response.status_code}): {res_data}")
+        requests.post(url, json=payload, timeout=10)
+        logger.info(f"🚀 [META CAPI] Evento: {event_name} | UID: {uid} | ID: {event_id}")
     except Exception as e:
-        logger.error(f"❌ [META CAPI] Erro de conexão: {e}")
+        logger.error(f"❌ Erro ao enviar CAPI: {e}")
 
-# ====================== TRATAMENTO DE CLIQUE ======================
+# ====================== TRATAMENTO DE CLIQUE (BOTÕES) ======================
 
 async def silent_button_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Rastreia o clique e mostra no log se a trava do Redis permitiu o envio."""
+    """Apenas rastreia o clique sem enviar nenhuma mensagem de volta."""
     query = update.callback_query
     uid = query.from_user.id
     cb_data = (query.data or "").lower()
     
-    # Avisa o Telegram que recebemos o clique
+    # Avisa o Telegram que recebemos o clique (necessário para o botão parar de girar)
     await query.answer()
 
     # Rastreia apenas botões específicos de intenção
     if any(x in cb_data for x in ["precos", "planos", "saber_mais"]):
-        key = f"lead_sent:{uid}:{date.today()}"
-        
-        logger.info(f"🔍 Verificando trava de Lead para UID: {uid} (Botão: {cb_data})")
-        
-        # Tenta definir a chave no Redis. Se retornar True, é a primeira vez no dia.
-        if r.set(key, "1", ex=86400, nx=True):
-            logger.info(f"✅ Trava liberada! Enviando Lead para Meta CAPI...")
+        # Trava de 24h para Lead não duplicar no mesmo dia
+        if r.set(f"lead_sent:{uid}:{date.today()}", "1", ex=86400, nx=True):
             enviar_evento_meta(uid, "Lead", f"lead_{uid}_{date.today()}", trigger=f"btn_{cb_data}")
-        else:
-            # Se cair aqui, o log vai te avisar que o código FUNCIONOU, mas não enviou para não duplicar
-            logger.info(f"🚫 Evento ignorado: O UID {uid} já disparou Lead hoje. (Chave: {key})")
 
-# ====================== ENGINE & WEBHOOKS ======================
+# ====================== WEBHOOKS (FLASK) ======================
 
 app = Flask(__name__)
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 application.add_handler(CallbackQueryHandler(silent_button_tracker))
 
-bot_loop = asyncio.new_event_loop()
-
-def run_bot():
-    asyncio.set_event_loop(bot_loop)
-    bot_loop.run_until_complete(application.initialize())
-    # Note: application.start() não é necessário para webhooks puros, mas initialize() sim.
-    logger.info("🤖 Thread do Bot Telegram inicializada.")
-    bot_loop.run_forever()
-
-threading.Thread(target=run_bot, daemon=True).start()
-
 @app.route("/webhook", methods=["POST"])
 def telegram_webhook():
+    """Recebe dados do Telegram apenas para capturar cliques em botões."""
     data = request.json
-    if not data: 
-        return "No data", 400
+    if not data: return "ok", 200
     
+    # Evita processar o mesmo update duas vezes (Retries do Telegram)
     upd_id = data.get("update_id")
-    if upd_id and not r.set(f"proc_upd:{upd_id}", "1", ex=3600, nx=True):
-        return "Duplicate", 200
+    if upd_id and not r.set(f"proc_upd:{upd_id}", "1", ex=86400, nx=True):
+        return "ok", 200
 
     update = Update.de_json(data, application.bot)
-    # Encaminha o processamento para a thread do bot
-    bot_loop.call_soon_threadsafe(asyncio.create_task, application.process_update(update))
+    asyncio.run_coroutine_threadsafe(application.process_update(update), bot_loop)
     return "ok", 200
 
 @app.route('/apex-webhook', methods=['POST'])
 def apex_webhook():
+    """Recebe dados da Apex para InitiateCheckout e Purchase."""
     data = request.get_json() or {}
     evento = data.get("event")
-    customer = data.get("customer", {})
-    uid = customer.get("chat_id")
+    uid = data.get("customer", {}).get("chat_id")
     transaction = data.get("transaction", {})
     t_id = transaction.get("id")
-    
-    # Previne erros de conversão se o valor vier vazio
-    try:
-        valor = float(transaction.get("plan_value", 0)) / 100
-    except:
-        valor = 0.0
+    valor = float(transaction.get("plan_value", 0)) / 100
 
-    logger.info(f"📩 Webhook Apex recebido: {evento} para UID: {uid}")
-
-    if not uid or not t_id: 
-        return "Missing data", 200
+    if not uid or not t_id: return "ok", 200
 
     if evento == "user_joined":
         if r.set(f"lead_sent:{uid}:{date.today()}", "1", ex=86400, nx=True):
             enviar_evento_meta(uid, "Lead", f"lead_{uid}_{date.today()}", trigger="apex_joined")
 
     elif evento == "payment_created":
+        # Trava de 10 min para não duplicar checkout se o cara gerar vários boletos
         if r.set(f"check_sent:{t_id}", "1", ex=600, nx=True):
             enviar_evento_meta(uid, "InitiateCheckout", f"init_{t_id}", value=valor)
 
     elif evento == "payment_approved":
+        # Trava de 7 dias para Purchase (Segurança máxima)
         if r.set(f"pur_sent:{t_id}", "1", ex=604800, nx=True):
             enviar_evento_meta(uid, "Purchase", f"pur_{t_id}", value=valor)
 
     return "ok", 200
 
+# ====================== START ENGINE ======================
+
+bot_loop = asyncio.new_event_loop()
+def run_bot():
+    asyncio.set_event_loop(bot_loop)
+    bot_loop.run_until_complete(application.initialize())
+    bot_loop.run_until_complete(application.start())
+    bot_loop.run_forever()
+
+threading.Thread(target=run_bot, daemon=True).start()
+
 @app.route("/", methods=["GET"])
-def home():
-    return {"status": "online", "service": "CAPI Tracker"}, 200
+def home(): return "Tracker Online", 200
+
+# ====================== ROUTES (Coloque Aqui) ======================
 
 @app.route("/set-webhook", methods=["GET"])
 def set_webhook():
-    if not WEBHOOK_BASE_URL:
-        return "Erro: WEBHOOK_BASE_URL não configurada", 500
-        
+    # Garante que a URL termine corretamente para o Telegram
     url = f"{WEBHOOK_BASE_URL.rstrip('/')}/webhook"
-    
-    async def setup():
-        return await application.bot.set_webhook(url, drop_pending_updates=True)
-    
-    future = asyncio.run_coroutine_threadsafe(setup(), bot_loop)
     try:
-        success = future.result(timeout=10)
-        if success:
-            return f"✅ Webhook configurado: {url}", 200
-        return "❌ Falha ao configurar webhook", 500
+        # O drop_pending_updates=True limpa o lixo de mensagens antigas
+        async def s(): 
+            await application.bot.set_webhook(url, drop_pending_updates=True)
+        
+        # Envia o comando para o loop do bot que está rodando em outra thread
+        asyncio.run_coroutine_threadsafe(s(), bot_loop).result()
+        return f"✅ Webhook configurado com sucesso: {url}", 200
     except Exception as e:
+        logger.error(f"❌ Erro ao configurar webhook: {e}")
         return f"❌ Erro: {str(e)}", 500
 
+@app.route("/", methods=["GET"])
+def home(): 
+    return "Tracker Online", 200
+
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8080))
-    logger.info(f"🌐 Servidor Flask iniciando na porta {port}")
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
