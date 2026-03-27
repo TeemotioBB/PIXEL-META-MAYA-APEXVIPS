@@ -132,11 +132,26 @@ threading.Thread(target=run_bot, daemon=True).start()
 
 @app.route("/webhook", methods=["POST"])
 def telegram_webhook():
-    data = request.json
-    if data:
+    try:
+        data = request.json
+        if not data: return "ok", 200
+        
+        # Pega o ID da mensagem para evitar duplicatas (Retries do Telegram)
+        update_id = data.get("update_id")
+        if update_id:
+            # Se já processei esse ID nos últimos 10 segundos, ignoro
+            if not r.set(f"proc_upd:{update_id}", "1", ex=10, nx=True):
+                logger.info(f"⚠️ [WEBHOOK] Update {update_id} ignorado (Duplicata/Retry).")
+                return "ok", 200
+
         update = Update.de_json(data, application.bot)
         asyncio.run_coroutine_threadsafe(application.process_update(update), bot_loop)
-    return "ok", 200
+        
+        # Retorna OK imediatamente para o Telegram não tentar de novo
+        return "ok", 200
+    except Exception as e:
+        logger.error(f"❌ Erro Webhook: {e}")
+        return "ok", 200 # Sempre retorne OK para evitar loops de erro no Telegram
 
 @app.route('/apex-webhook', methods=['POST'])
 def apex_webhook():
