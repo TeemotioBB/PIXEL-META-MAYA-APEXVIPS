@@ -111,9 +111,15 @@ def telegram_webhook():
         asyncio.run_coroutine_threadsafe(application.process_update(update), bot_loop)
     return "ok", 200
 
-@app.route('/apex-webhook', methods=['POST'])
+@app.route('/apex-webhook', methods=['POST', 'GET']) # Adicionado 'GET' aqui
 def apex_webhook():
-    data = request.get_json(silent=True) or {}
+    # Se for apenas um teste da Apex (GET), responde OK
+    if request.method == 'GET':
+        return {"status": "ok", "message": "Endpoint ativo"}, 200
+
+    data = request.get_json(silent=True) or request.form.to_dict() or {}
+    logger.info(f"📢 [APEX] Payload recebido: {data}")
+
     evento = data.get("event")
     customer = data.get("customer", {})
     uid = customer.get("chat_id")
@@ -122,12 +128,33 @@ def apex_webhook():
     plan_name = transaction.get("plan_name", "Plano VIP")
     t_id = transaction.get("internal_transaction_id") or transaction.get("external_transaction_id")
     
-    # Regra de centavos (986 vira 9.86)
     plan_value_raw = transaction.get("plan_value") or 0
     valor_real = float(plan_value_raw) / 100
 
     if not uid:
-        return {"status": "error", "message": "no_uid"}, 200
+        logger.warning(f"⚠️ [APEX] chat_id ausente no evento: {evento}")
+        return {"status": "ok"}, 200
+
+    # 1. INICIAR CHECKOUT
+    if evento in ["user_joined", "payment_created", "checkout_created"]:
+        enviar_evento_capi_async(uid, "InitiateCheckout", {
+            "value": 0.00,
+            "currency": "BRL",
+            "content_name": plan_name,
+            "content_type": "product"
+        })
+
+    # 2. COMPRA APROVADA
+    elif evento in ["payment_approved", "sale_approved"]:
+        enviar_evento_capi_async(uid, "Purchase", {
+            "value": valor_real,
+            "currency": "BRL",
+            "content_name": plan_name,
+            "content_type": "product",
+            "num_items": 1
+        }, f"pur_{t_id}")
+
+    return {"status": "ok"}, 200
 
     # 1. INICIAR CHECKOUT (Valor fixo 0.00 conforme pedido)
     if evento in ["user_joined", "payment_created", "checkout_created"]:
