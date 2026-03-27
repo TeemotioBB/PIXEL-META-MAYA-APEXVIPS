@@ -78,13 +78,19 @@ def enviar_evento_capi_async(uid: int, event_name: str, custom_data=None, event_
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    redis_key = f"lead_sent:{uid}:{date.today()}"
+    
+    # --- BLOCO COMENTADO PARA PERMITIR TESTES REPETIDOS ---
+    # redis_key = f"lead_sent:{uid}:{date.today()}"
+    # if r and not r.exists(redis_key):
+    #     r.set(redis_key, "1", ex=86400)
+    #     enviar_evento_capi_async(uid, "Lead")
+    # elif not r:
+    #     enviar_evento_capi_async(uid, "Lead")
+    # ----------------------------------------------------
 
-    if r and not r.exists(redis_key):
-        r.set(redis_key, "1", ex=86400)
-        enviar_evento_capi_async(uid, "Lead")
-    elif not r:
-        enviar_evento_capi_async(uid, "Lead")
+    # ENVIO DIRETO (DISPARA TODA VEZ QUE VOCÊ DER /START)
+    enviar_evento_capi_async(uid, "Lead")
+    logger.info(f"🚀 [BOT] /start acionado (modo teste liberado) | uid={uid}")
 
 # ====================== ENGINE FLASK ======================
 app = Flask(__name__)
