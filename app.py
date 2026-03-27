@@ -76,7 +76,7 @@ def enviar_evento_capi(uid: int, event_name: str, custom_data=None, event_id=Non
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    logger.info(f"🚀 [BOT] Recebido /start do usuário {uid}")
+    logger.info(f"🚀 [BOT] Recebido /start do usuário {uid} (Rastreio Silencioso)")
 
     # --- EVENTO 1: LEAD (Com trava de 24h no Redis) ---
     redis_key = f"lead_sent:{uid}:{date.today()}"
@@ -87,12 +87,9 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         threading.Thread(target=enviar_evento_capi, args=(uid, "Lead")).start()
 
     # --- EVENTO 2: INITIATE CHECKOUT (Sempre que iniciar o bot) ---
-    # Geralmente não bloqueamos checkout por Redis para capturar cada intenção
     threading.Thread(target=enviar_evento_capi, args=(uid, "InitiateCheckout")).start()
 
-    await update.message.reply_text(
-        "👋 Bem-vindo! Se você já realizou o pagamento, aguarde alguns instantes para a liberação do seu acesso."
-    )
+    # A linha de reply_text foi removida para o bot não interferir na experiência do usuário.
 
 # ====================== ROTAS FLASK ======================
 app = Flask(__name__)
