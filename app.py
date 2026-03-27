@@ -35,20 +35,32 @@ except Exception as e:
     logger.error(f"❌ Erro Redis: {e}")
     raise
 
+# ====================== FUNÇÃO AUXILIAR ======================
+def build_user_data(uid: int, user_info: dict = None) -> dict:
+    """Monta o payload de user_data com parâmetros aceitos pela Meta."""
+    user_data = {"external_id": [hash_data(str(uid))]}
+    if user_info:
+        if user_info.get("ip"): user_data["client_ip_address"] = user_info["ip"]
+        if user_info.get("ua"): user_data["client_user_agent"] = user_info["ua"]
+        if user_info.get("fbp"): user_data["fbp"] = user_info["fbp"]
+        if user_info.get("fbc"): user_data["fbc"] = user_info["fbc"]
+    return user_data
+
 # ====================== CAPI FUNCTIONS ======================
-def enviar_lead_capi(uid: int, trigger: str):
+def enviar_lead_capi(uid: int, trigger: str, user_info: dict = None):
     redis_key = f"lead_sent:{uid}:{date.today()}"
     if r.exists(redis_key):
         logger.info(f"⚠️ [CAPI] Lead para {uid} já enviado hoje (Filtro Ativo).")
         return
     r.set(redis_key, "1", ex=86400)
+    
     payload = {
         "data": [{
             "event_name": "Lead",
             "event_time": int(time.time()),
             "event_id": f"lead_{uid}_{date.today()}",
             "action_source": "chat",
-            "user_data": {"external_id": [hash_data(str(uid))]},
+            "user_data": build_user_data(uid, user_info),
             "custom_data": {"trigger": trigger}
         }],
         "access_token": ACCESS_TOKEN
@@ -58,43 +70,50 @@ def enviar_lead_capi(uid: int, trigger: str):
         logger.info(f"🟢 [CAPI] Lead ENVIADO | UID: {uid} | Trigger: {trigger}")
     except Exception as e: logger.error(f"❌ Erro Lead: {e}")
 
-def enviar_initiatecheckout_capi(uid: int):
+def enviar_initiatecheckout_capi(uid: int, user_info: dict = None, eid: str = None):
     redis_key = f"checkout_sent:{uid}"
     if r.exists(redis_key):
         logger.info(f"⚠️ [CAPI] Checkout para {uid} ignorado (Já enviado na última 1h).")
         return
     r.set(redis_key, "1", ex=3600)
+    
+    # Se houver ID de transação da Apex, usa ele para desduplicar
+    event_id = eid if eid else f"init_{uid}_{int(time.time())}"
+    
     payload = {
         "data": [{
             "event_name": "InitiateCheckout",
             "event_time": int(time.time()),
-            "event_id": f"init_{uid}_{int(time.time())}",
+            "event_id": event_id,
             "action_source": "chat",
-            "user_data": {"external_id": [hash_data(str(uid))]},
+            "user_data": build_user_data(uid, user_info),
             "custom_data": {"currency": "BRL", "value": 0.00}
         }],
         "access_token": ACCESS_TOKEN
     }
     try:
         requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
-        logger.info(f"🔥 [CAPI] Checkout ENVIADO | UID: {uid}")
+        logger.info(f"🔥 [CAPI] Checkout ENVIADO | UID: {uid} | EID: {event_id}")
     except Exception as e: logger.error(f"❌ Erro Checkout: {e}")
 
-def enviar_purchase_capi(uid: int, valor: float):
+def enviar_purchase_capi(uid: int, valor: float, user_info: dict = None, eid: str = None):
+    # OBRIGATÓRIO usar o ID da transação da Apex se ele existir para não duplicar
+    event_id = eid if eid else f"pur_{uid}_{int(time.time())}"
+    
     payload = {
         "data": [{
             "event_name": "Purchase",
             "event_time": int(time.time()),
-            "event_id": f"pur_{uid}_{int(time.time())}",
+            "event_id": event_id,
             "action_source": "chat",
-            "user_data": {"external_id": [hash_data(str(uid))]},
+            "user_data": build_user_data(uid, user_info),
             "custom_data": {"value": valor, "currency": "BRL"}
         }],
         "access_token": ACCESS_TOKEN
     }
     try:
         requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
-        logger.info(f"💰 [CAPI] Purchase ENVIADO | UID: {uid} | R$ {valor}")
+        logger.info(f"💰 [CAPI] Purchase ENVIADO | UID: {uid} | R$ {valor} | EID: {event_id}")
     except Exception as e: logger.error(f"❌ Erro Purchase: {e}")
 
 # ====================== HANDLERS ======================
@@ -124,7 +143,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 app = Flask(__name__)
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-# Registrar Handlers antes de tudo
 application.add_handler(CommandHandler("start", start_handler))
 application.add_handler(CallbackQueryHandler(button_handler))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
@@ -155,12 +173,31 @@ def webhook():
 def apex_webhook():
     data = request.get_json() or {}
     evento = data.get("event")
-    uid = data.get("customer", {}).get("chat_id")
-    val_raw = data.get("transaction", {}).get("plan_value", 0)
+    
+    customer = data.get("customer", {})
+    transaction = data.get("transaction", {})
+    
+    uid = customer.get("chat_id")
+    # Captura o ID real da transação para desduplicação na Meta
+    transaction_id = str(transaction.get("id", ""))
+    val_raw = transaction.get("plan_value", 0)
+    
     if not uid: return "ok", 200
-    if evento == "user_joined": enviar_lead_capi(uid, "apex_joined")
-    elif evento == "payment_created": enviar_initiatecheckout_capi(uid)
-    elif evento == "payment_approved": enviar_purchase_capi(uid, float(val_raw)/100)
+
+    user_info = {
+        "ip": customer.get("client_ip") or customer.get("ip"),
+        "ua": customer.get("user_agent"),
+        "fbp": customer.get("fbp") or data.get("metadata", {}).get("fbp"),
+        "fbc": customer.get("fbc") or data.get("metadata", {}).get("fbc")
+    }
+
+    if evento == "user_joined": 
+        enviar_lead_capi(uid, "apex_joined", user_info)
+    elif evento == "payment_created": 
+        enviar_initiatecheckout_capi(uid, user_info, eid=transaction_id)
+    elif evento == "payment_approved": 
+        enviar_purchase_capi(uid, float(val_raw)/100, user_info, eid=transaction_id)
+        
     return "ok", 200
 
 @app.route("/set-webhook", methods=["GET"])
