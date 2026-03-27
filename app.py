@@ -60,12 +60,15 @@ def montar_user_data(uid):
 
 # ====================== CAPI FUNCTIONS ======================
 def enviar_lead_capi(uid: int, trigger: str):
-    redis_key = f"lead_sent:{uid}:{date.today()}"
-    if r.exists(redis_key):
-        return
-    r.set(redis_key, "1", ex=86400)
+    # --- COMENTE AS 3 LINHAS ABAIXO PARA TESTAR ---
+    # redis_key = f"lead_sent:{uid}:{date.today()}"
+    # if r.exists(redis_key):
+    #     return
+    # r.set(redis_key, "1", ex=86400)
+    # ----------------------------------------------
 
     user_data = montar_user_data(uid) 
+    # ... resto da função igual
 
     payload = {
         "data": [{
