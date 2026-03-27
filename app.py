@@ -51,7 +51,6 @@ def enviar_evento_capi(uid: int, event_name: str, custom_data=None, event_id=Non
                 "external_id": [hash_data(str(uid))]
             },
             "custom_data": custom_data or {},
-            "test_event_code": "TEST22278"  # REMOVA ESTA LINHA APÓS VALIDAR NO FACEBOOK
         }],
         "access_token": ACCESS_TOKEN
     }
