@@ -9,7 +9,7 @@ import redis
 from datetime import date
 from flask import Flask, request
 from telegram import Update
-from telegram.ext import Application, MessageHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram.ext import Application, CallbackQueryHandler, ContextTypes
 
 # ====================== LOGGING ======================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -34,7 +34,7 @@ except Exception as e:
     logger.error(f"❌ Erro Redis: {e}")
     raise
 
-# ====================== CAPI FUNCTIONS (COM ANTI-DUPLICAÇÃO) ======================
+# ====================== CAPI FUNCTIONS ======================
 
 def enviar_lead_capi(uid: int, trigger: str):
     redis_key = f"lead_sent:{uid}:{date.today()}"
@@ -52,8 +52,10 @@ def enviar_lead_capi(uid: int, trigger: str):
         }],
         "access_token": ACCESS_TOKEN
     }
-    requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
-    logger.info(f"🟢 [CAPI] Lead Enviado: {uid}")
+    try:
+        requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
+        logger.info(f"🟢 [CAPI] Lead Enviado: {uid}")
+    except: pass
 
 def enviar_initiatecheckout_capi(uid: int, valor: float = 0.0, transaction_id: str = None):
     t_id = transaction_id or f"init_{uid}_{int(time.time() / 600)}"
@@ -71,12 +73,13 @@ def enviar_initiatecheckout_capi(uid: int, valor: float = 0.0, transaction_id: s
         }],
         "access_token": ACCESS_TOKEN
     }
-    requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
-    logger.info(f"🔥 [CAPI] Checkout Enviado: {uid} | R$ {valor}")
+    try:
+        requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
+        logger.info(f"🔥 [CAPI] Checkout Enviado: {uid}")
+    except: pass
 
 def enviar_purchase_capi(uid: int, valor: float, transaction_id: str):
     if not r.set(f"pur_sent:{transaction_id}", "1", ex=604800, nx=True):
-        logger.info(f"⚠️ [CAPI] Compra {transaction_id} duplicada bloqueada.")
         return
 
     payload = {
@@ -90,8 +93,10 @@ def enviar_purchase_capi(uid: int, valor: float, transaction_id: str):
         }],
         "access_token": ACCESS_TOKEN
     }
-    requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
-    logger.info(f"💰 [CAPI] Purchase Enviado: {transaction_id} | R$ {valor}")
+    try:
+        requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
+        logger.info(f"💰 [CAPI] Purchase Enviado: {transaction_id}")
+    except: pass
 
 # ====================== HANDLERS ======================
 
@@ -104,12 +109,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if any(x in cb_data for x in ["precos", "planos", "saber_mais", "como_funciona"]):
         enviar_lead_capi(uid, f"btn_{cb_data}")
 
-    if any(x in cb_data for x in ["plan", "buy", "pix", "pay"]):
-        enviar_initiatecheckout_capi(uid)
-
 # ====================== ENGINE & ROUTES ======================
 app = Flask(__name__)
 application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+# AQUI: Removi todos os CommandHandlers e MessageHandlers. O bot só lê cliques em botões.
 application.add_handler(CallbackQueryHandler(button_handler))
 
 bot_loop = asyncio.new_event_loop()
@@ -129,12 +133,13 @@ def telegram_webhook():
 
         update_id = data.get("update_id")
         if update_id:
-            # ✅ FIX 1: Janela aumentada de 10s para 24h — cobre todos os retries do Telegram
             if not r.set(f"proc_upd:{update_id}", "1", ex=86400, nx=True):
-                logger.info(f"⚠️ [WEBHOOK] Update {update_id} ignorado (Duplicata/Retry).")
                 return "ok", 200
 
         update = Update.de_json(data, application.bot)
+        
+        # Se chegar um comando /start aqui, o application.process_update simplesmente vai ignorar
+        # porque não existe mais Handler para isso.
         asyncio.run_coroutine_threadsafe(application.process_update(update), bot_loop)
 
         return "ok", 200
@@ -165,9 +170,9 @@ def apex_webhook():
 def set_webhook():
     url = f"{WEBHOOK_BASE_URL.rstrip('/')}/webhook"
     try:
-        async def s(): await application.bot.set_webhook(url)
+        async def s(): await application.bot.set_webhook(url, drop_pending_updates=True)
         asyncio.run_coroutine_threadsafe(s(), bot_loop).result()
-        return f"✅ Webhook configurado: {url}", 200
+        return f"✅ Webhook configurado e fila limpa: {url}", 200
     except Exception as e: return str(e), 500
 
 @app.route("/", methods=["GET"])
