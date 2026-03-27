@@ -37,7 +37,6 @@ except Exception as e:
 # ====================== CAPI FUNCTIONS (COM ANTI-DUPLICAÇÃO) ======================
 
 def enviar_lead_capi(uid: int, trigger: str):
-    # Trava por 24h para evitar duplicatas de Lead no mesmo dia
     redis_key = f"lead_sent:{uid}:{date.today()}"
     if not r.set(redis_key, "1", ex=86400, nx=True):
         return
@@ -57,7 +56,6 @@ def enviar_lead_capi(uid: int, trigger: str):
     logger.info(f"🟢 [CAPI] Lead Enviado: {uid}")
 
 def enviar_initiatecheckout_capi(uid: int, valor: float = 0.0, transaction_id: str = None):
-    # Deduplicação: Janela de 10 min ou ID fixo da Apex
     t_id = transaction_id or f"init_{uid}_{int(time.time() / 600)}"
     if not r.set(f"checkout_sent:{t_id}", "1", ex=600, nx=True):
         return
@@ -77,7 +75,6 @@ def enviar_initiatecheckout_capi(uid: int, valor: float = 0.0, transaction_id: s
     logger.info(f"🔥 [CAPI] Checkout Enviado: {uid} | R$ {valor}")
 
 def enviar_purchase_capi(uid: int, valor: float, transaction_id: str):
-    # Trava de 7 dias (Blindagem contra webhooks repetidos da Apex)
     if not r.set(f"pur_sent:{transaction_id}", "1", ex=604800, nx=True):
         logger.info(f"⚠️ [CAPI] Compra {transaction_id} duplicada bloqueada.")
         return
@@ -99,7 +96,15 @@ def enviar_purchase_capi(uid: int, valor: float, transaction_id: str):
 # ====================== HANDLERS ======================
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"👤 [BOT] /start recebido: {update.effective_user.id}")
+    uid = update.effective_user.id
+
+    # ✅ FIX 2: Trava de 5s por usuário — bloqueia double-start do mesmo uid
+    if not r.set(f"start_lock:{uid}", "1", ex=5, nx=True):
+        logger.info(f"⚠️ [START] Duplicata bloqueada para uid={uid}")
+        return
+
+    logger.info(f"👤 [BOT] /start recebido: {uid}")
+    # Coloque aqui o restante da sua lógica do /start (mensagem de boas-vindas, etc.)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -107,11 +112,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     cb_data = (query.data or "").lower()
 
-    # Filtro de Lead: Somente em botões de intenção real
     if any(x in cb_data for x in ["precos", "planos", "saber_mais", "como_funciona"]):
         enviar_lead_capi(uid, f"btn_{cb_data}")
 
-    # InitiateCheckout via clique no bot
     if any(x in cb_data for x in ["plan", "buy", "pix", "pay"]):
         enviar_initiatecheckout_capi(uid)
 
@@ -135,23 +138,21 @@ def telegram_webhook():
     try:
         data = request.json
         if not data: return "ok", 200
-        
-        # Pega o ID da mensagem para evitar duplicatas (Retries do Telegram)
+
         update_id = data.get("update_id")
         if update_id:
-            # Se já processei esse ID nos últimos 10 segundos, ignoro
-            if not r.set(f"proc_upd:{update_id}", "1", ex=10, nx=True):
+            # ✅ FIX 1: Janela aumentada de 10s para 24h — cobre todos os retries do Telegram
+            if not r.set(f"proc_upd:{update_id}", "1", ex=86400, nx=True):
                 logger.info(f"⚠️ [WEBHOOK] Update {update_id} ignorado (Duplicata/Retry).")
                 return "ok", 200
 
         update = Update.de_json(data, application.bot)
         asyncio.run_coroutine_threadsafe(application.process_update(update), bot_loop)
-        
-        # Retorna OK imediatamente para o Telegram não tentar de novo
+
         return "ok", 200
     except Exception as e:
         logger.error(f"❌ Erro Webhook: {e}")
-        return "ok", 200 # Sempre retorne OK para evitar loops de erro no Telegram
+        return "ok", 200
 
 @app.route('/apex-webhook', methods=['POST'])
 def apex_webhook():
@@ -161,7 +162,7 @@ def apex_webhook():
     transaction = data.get("transaction", {})
     t_id = transaction.get("id")
     val_raw = float(transaction.get("plan_value", 0)) / 100
-    
+
     if not uid or not t_id: return "ok", 200
 
     if evento == "user_joined":
