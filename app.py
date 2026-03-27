@@ -76,17 +76,27 @@ def enviar_evento_meta(uid: int, event_name: str, event_id: str, value: float = 
 # ====================== TRATAMENTO DE CLIQUE ======================
 
 async def silent_button_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Rastreia o clique e mostra no log se a trava do Redis permitiu o envio."""
     query = update.callback_query
     uid = query.from_user.id
     cb_data = (query.data or "").lower()
     
+    # Avisa o Telegram que recebemos o clique
     await query.answer()
-    logger.info(f"🖱️ Clique detectado: {cb_data} de UID: {uid}")
 
+    # Rastreia apenas botões específicos de intenção
     if any(x in cb_data for x in ["precos", "planos", "saber_mais"]):
         key = f"lead_sent:{uid}:{date.today()}"
+        
+        logger.info(f"🔍 Verificando trava de Lead para UID: {uid} (Botão: {cb_data})")
+        
+        # Tenta definir a chave no Redis. Se retornar True, é a primeira vez no dia.
         if r.set(key, "1", ex=86400, nx=True):
+            logger.info(f"✅ Trava liberada! Enviando Lead para Meta CAPI...")
             enviar_evento_meta(uid, "Lead", f"lead_{uid}_{date.today()}", trigger=f"btn_{cb_data}")
+        else:
+            # Se cair aqui, o log vai te avisar que o código FUNCIONOU, mas não enviou para não duplicar
+            logger.info(f"🚫 Evento ignorado: O UID {uid} já disparou Lead hoje. (Chave: {key})")
 
 # ====================== ENGINE & WEBHOOKS ======================
 
