@@ -9,7 +9,7 @@ import redis
 from datetime import date
 from flask import Flask, request
 from telegram import Update
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ====================== LOGGING ======================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -52,45 +52,33 @@ def enviar_evento_capi(uid: int, event_name: str, custom_data=None, event_id=Non
             },
             "custom_data": custom_data or {},
         }],
-        "test_event_code": "TEST22278", # <-- POSIÇÃO CORRETA (FORA DO DATA)
+        "test_event_code": "TEST22278",
         "access_token": ACCESS_TOKEN
     }
 
     try:
         url = f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events"
         resp = requests.post(url, json=payload, timeout=10)
-        resp_json = resp.json()
-        
         if resp.status_code == 200:
-            logger.info(f"✅ [CAPI] Evento {event_name} ACEITO pelo Meta | uid={uid}")
+            logger.info(f"✅ [CAPI] {event_name} ENVIADO | uid={uid}")
             return True
         else:
-            logger.error(f"❌ [CAPI] Evento REJEITADO | erro: {resp_json}")
+            logger.error(f"❌ [CAPI] Erro Meta: {resp.json()}")
             return False
     except Exception as e:
-        logger.error(f"💥 [CAPI] Erro ao enviar: {e}")
+        logger.error(f"💥 [CAPI] Erro: {e}")
         return False
 
 def enviar_evento_capi_async(uid: int, event_name: str, custom_data=None, event_id=None):
     threading.Thread(target=enviar_evento_capi, args=(uid, event_name, custom_data, event_id), daemon=True).start()
 
-# ====================== HANDLERS TELEGRAM ======================
+# ====================== HANDLER TELEGRAM ======================
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    
-    # --- BLOCO COMENTADO PARA PERMITIR TESTES REPETIDOS ---
-    # redis_key = f"lead_sent:{uid}:{date.today()}"
-    # if r and not r.exists(redis_key):
-    #      r.set(redis_key, "1", ex=86400)
-    #      enviar_evento_capi_async(uid, "Lead")
-    # elif not r:
-    #      enviar_evento_capi_async(uid, "Lead")
-    # ----------------------------------------------------
-
-    # ENVIO DIRETO (DISPARA TODA VEZ QUE VOCÊ DER /START)
+    # Envio direto para teste
     enviar_evento_capi_async(uid, "Lead")
-    logger.info(f"🚀 [BOT] /start acionado (modo teste liberado) | uid={uid}")
+    logger.info(f"🚀 [BOT] /start recebido | uid={uid}")
 
 # ====================== ENGINE FLASK ======================
 app = Flask(__name__)
@@ -107,7 +95,53 @@ def run_bot_init():
 
 threading.Thread(target=run_bot_init, daemon=True).start()
 
-# ====================== ROTAS WEBHOOK ======================
+# ====================== ROTA APEX WEBHOOK ======================
+
+@app.route('/apex-webhook', methods=['POST', 'GET'])
+def apex_webhook():
+    if request.method == 'GET':
+        return {"status": "ok", "message": "Endpoint ativo"}, 200
+
+    data = request.get_json(silent=True) or {}
+    logger.info(f"📢 [APEX] Webhook recebido: {data.get('event')}")
+
+    evento = data.get("event")
+    customer = data.get("customer", {})
+    uid = customer.get("chat_id")
+    
+    transaction = data.get("transaction", {})
+    plan_name = transaction.get("plan_name", "Plano VIP")
+    plan_value_raw = transaction.get("plan_value") or 0
+    
+    # Regra de centavos (Ex: 4990 -> 49.90)
+    valor_real = float(plan_value_raw) / 100
+    
+    # ID único para evitar duplicidade no Meta
+    t_id = transaction.get("internal_transaction_id") or f"at_{int(time.time())}"
+
+    if not uid:
+        logger.warning("⚠️ Webhook recebido sem chat_id")
+        return {"status": "ok"}, 200
+
+    # Mapeamento baseado nos exemplos da Apex
+    if evento in ["user_joined", "payment_created"]:
+        logger.info(f"🛒 [APEX] Checkout (0.00) para uid={uid}")
+        enviar_evento_capi_async(uid, "InitiateCheckout", {
+            "value": 0.00,
+            "currency": "BRL",
+            "content_name": plan_name
+        })
+
+    elif evento == "payment_approved":
+        logger.info(f"💰 [APEX] Compra aprovada! R${valor_real:.2f} | uid={uid}")
+        enviar_evento_capi_async(uid, "Purchase", {
+            "value": valor_real,
+            "currency": "BRL",
+            "content_name": plan_name,
+            "num_items": 1
+        }, f"pur_{t_id}")
+
+    return {"status": "ok"}, 200
 
 @app.route("/webhook", methods=["POST"])
 def telegram_webhook():
@@ -117,52 +151,6 @@ def telegram_webhook():
         asyncio.run_coroutine_threadsafe(application.process_update(update), bot_loop)
     return "ok", 200
 
-@app.route('/apex-webhook', methods=['POST', 'GET'])
-def apex_webhook():
-    if request.method == 'GET':
-        return {"status": "ok", "message": "Endpoint ativo"}, 200
-
-    data = request.get_json(silent=True) or request.form.to_dict() or {}
-    logger.info(f"📢 [APEX] Payload recebido: {data}")
-
-    evento = data.get("event")
-    customer = data.get("customer", {})
-    uid = customer.get("chat_id")
-    
-    transaction = data.get("transaction", {})
-    plan_name = transaction.get("plan_name", "Plano VIP")
-    t_id = transaction.get("internal_transaction_id") or transaction.get("external_transaction_id")
-    
-    plan_value_raw = transaction.get("plan_value") or 0
-    valor_real = float(plan_value_raw) / 100
-
-    if not uid:
-        logger.warning(f"⚠️ [APEX] chat_id ausente no evento: {evento}")
-        return {"status": "ok"}, 200
-
-    # 1. INICIAR CHECKOUT
-    if evento in ["user_joined", "payment_created", "checkout_created"]:
-        logger.info(f"🛒 [APEX] Enviando InitiateCheckout (0.00) | uid={uid}")
-        enviar_evento_capi_async(uid, "InitiateCheckout", {
-            "value": 0.00,
-            "currency": "BRL",
-            "content_name": plan_name,
-            "content_type": "product"
-        })
-
-    # 2. COMPRA APROVADA
-    elif evento in ["payment_approved", "sale_approved"]:
-        logger.info(f"💰 [APEX] Enviando Purchase (R${valor_real:.2f}) | uid={uid}")
-        enviar_evento_capi_async(uid, "Purchase", {
-            "value": valor_real,
-            "currency": "BRL",
-            "content_name": plan_name,
-            "content_type": "product",
-            "num_items": 1
-        }, f"pur_{t_id}")
-
-    return {"status": "ok"}, 200
-
 @app.route("/set-webhook", methods=["GET"])
 def set_webhook():
     url = f"{WEBHOOK_BASE_URL.rstrip('/')}/webhook"
@@ -171,7 +159,7 @@ def set_webhook():
     return f"✅ Webhook configurado: {url}", 200
 
 @app.route("/")
-def home(): return "Bot Online", 200
+def home(): return "Servidor Maya Online", 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
