@@ -9,7 +9,7 @@ import requests
 import redis
 import ast
 from datetime import date
-from flask import Flask, request, redirect
+from flask import Flask, request, redirect, jsonify
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes
 
@@ -38,26 +38,29 @@ except Exception as e:
 
 # ====================== USER DATA ======================
 def montar_user_data(uid):
-    """Busca dados no Redis e monta o dicionário user_data para a Meta"""
+    """Busca dados no Redis e monta o dicionário user_data para a Meta com IP e UA reais"""
     user_data = {"external_id": [hash_data(str(uid))]}
 
     fbp = r.get(f"fbp:{uid}")
     fbc_raw = r.get(f"fbclid:{uid}")
+    ip = r.get(f"ip:{uid}")
+    ua = r.get(f"ua:{uid}")
 
-    logger.info(f"[montar_user_data] UID {uid} → FBP encontrado: {bool(fbp)} | FBC encontrado: {bool(fbc_raw)}")
+    logger.info(f"[montar_user_data] UID {uid} → FBP: {bool(fbp)} | FBC: {bool(fbc_raw)} | IP: {bool(ip)} | UA: {bool(ua)}")
 
     if fbp:
-        user_data["fbp"] = [fbp]
-
+        user_data["fbp"] = fbp
     if fbc_raw:
-        user_data["fbc"] = [fbc_raw]
-
-    try:
-        ua = request.headers.get('User-Agent', 'TelegramBot/1.0')
-    except Exception:
-        ua = 'TelegramBot/1.0'
-
-    user_data["client_user_agent"] = [ua]
+        user_data["fbc"] = fbc_raw
+    if ip:
+        user_data["client_ip_address"] = ip
+    
+    if ua:
+        user_data["client_user_agent"] = ua
+    else:
+        # Fallback caso não tenha passado pela página
+        user_data["client_user_agent"] = "TelegramBot/1.0"
+        
     return user_data
 
 # ====================== CAPI FUNCTIONS ======================
@@ -76,7 +79,7 @@ def enviar_lead_capi(uid: int, trigger: str):
     }
     try:
         requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
-        logger.info(f"🟢 [CAPI] Lead ENVIADO | UID: {uid} | Tracking: {'fbc' in user_data}")
+        logger.info(f"🟢 [CAPI] Lead ENVIADO | UID: {uid} | Trigger: {trigger}")
     except Exception as e:
         logger.error(f"❌ Erro Lead: {e}")
 
@@ -100,7 +103,7 @@ def enviar_initiatecheckout_capi(uid: int):
     }
     try:
         requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
-        logger.info(f"🔥 [CAPI] Checkout ENVIADO | UID: {uid} | Tracking: {'fbc' in user_data}")
+        logger.info(f"🔥 [CAPI] Checkout ENVIADO | UID: {uid}")
     except Exception as e:
         logger.error(f"❌ Erro Checkout: {e}")
 
@@ -119,7 +122,7 @@ def enviar_purchase_capi(uid: int, valor: float):
     }
     try:
         requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
-        logger.info(f"💰 [CAPI] Purchase ENVIADO | UID: {uid} | R$ {valor:.2f} | Tracking: {'fbc' in user_data}")
+        logger.info(f"💰 [CAPI] Purchase ENVIADO | UID: {uid} | R$ {valor:.2f}")
     except Exception as e:
         logger.error(f"❌ Erro Purchase: {e}")
 
@@ -143,13 +146,15 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 tracking_data = ast.literal_eval(tracking_str)
 
+                # Salva os dados de tracking no Redis por 7 dias
                 if "fbp" in tracking_data:
                     r.set(f"fbp:{uid}", tracking_data["fbp"], ex=604800)
-                    logger.info(f"✅ FBP salvo para UID {uid}")
-
                 if "fbc" in tracking_data:
                     r.set(f"fbclid:{uid}", tracking_data["fbc"], ex=604800)
-                    logger.info(f"✅ FBC salvo para UID {uid}")
+                if "client_ip" in tracking_data:
+                    r.set(f"ip:{uid}", tracking_data["client_ip"], ex=604800)
+                if "client_user_agent" in tracking_data:
+                    r.set(f"ua:{uid}", tracking_data["client_user_agent"], ex=604800)
 
                 r.delete(f"tracking:{temp_key}")
                 enviar_lead_capi(uid, "start_com_tracking")
@@ -201,23 +206,43 @@ threading.Thread(target=run_bot, daemon=True).start()
 # ====================== ROUTES ======================
 @app.route('/apex-tracking', methods=['GET'])
 def apex_tracking():
+    # 1. Captura o UID enviado pelo Front-end
+    uid = request.args.get('uid')
+    if not uid:
+        uid = f"track_{int(time.time())}"
+
     fbclid = request.args.get('fbclid')
     fbp = request.args.get('fbp')
-    logger.info(f"[TRACKING RECEBIDO] fbclid={fbclid} | fbp={fbp}")
+    fbc = request.args.get('fbc') # Captura o FBC do front
 
-    temp_key = f"track_{int(time.time())}"
+    # 2. Captura o IP e User-Agent REAIS da requisição
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    client_user_agent = request.headers.get('User-Agent')
+
+    logger.info(f"[TRACKING RECEBIDO] uid={uid} | fbclid={fbclid} | fbp={fbp}")
+
     tracking_data = {}
 
     if fbp:
         tracking_data["fbp"] = fbp
-    if fbclid:
+    
+    if fbc:
+        tracking_data["fbc"] = fbc
+    elif fbclid:
         creation_time = int(time.time() * 1000)
-        fbc_formatted = f"fb.1.{creation_time}.{fbclid}"
-        tracking_data["fbc"] = fbc_formatted
+        tracking_data["fbc"] = f"fb.1.{creation_time}.{fbclid}"
 
-    r.set(f"tracking:{temp_key}", str(tracking_data), ex=86400)
-    bot_url = f"https://t.me/Mayaoficial_bot?start={temp_key}"
-    return redirect(bot_url)
+    if client_ip:
+        tracking_data["client_ip"] = client_ip.split(',')[0].strip()
+    
+    if client_user_agent:
+        tracking_data["client_user_agent"] = client_user_agent
+
+    # 3. Salva no Redis usando a chave do Front-end
+    r.set(f"tracking:{uid}", str(tracking_data), ex=86400)
+    
+    # 4. Retorna JSON para o fetch do front-end
+    return jsonify({"status": "ok", "uid": uid}), 200
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
