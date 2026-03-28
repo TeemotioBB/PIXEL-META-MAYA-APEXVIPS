@@ -9,7 +9,7 @@ import requests
 import redis
 import ast
 from datetime import date
-from flask import Flask, request, redirect, jsonify
+from flask import Flask, request, jsonify
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes
 
@@ -58,7 +58,6 @@ def montar_user_data(uid):
     if ua:
         user_data["client_user_agent"] = ua
     else:
-        # Fallback caso não tenha passado pela página
         user_data["client_user_agent"] = "TelegramBot/1.0"
         
     return user_data
@@ -127,11 +126,10 @@ def enviar_purchase_capi(uid: int, valor: float):
         logger.error(f"❌ Erro Purchase: {e}")
 
 # ====================== HANDLERS ======================
-# ====================== HANDLERS ======================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     args = context.args
-    payload = args[0] if args else "" # Pega o track_... se existir
+    payload = args[0] if args else "" 
 
     logger.info(f"🚀 [START] User: {uid} | Payload: {payload}")
 
@@ -139,22 +137,18 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         temp_key = f"tracking:{payload}"
         tracking_str = None
         
-        # TENTA BUSCAR 3 VEZES (com intervalo de 1s)
-        # Isso resolve o problema de o bot ser mais rápido que o fetch do site
-        for tentativa in range(3):
+        # SUPER-LOOP: Tenta buscar 10 vezes (20 segundos no total)
+        for tentativa in range(10):
             tracking_str = r.get(temp_key)
             if tracking_str:
                 break
-            logger.info(f"⏳ Tentativa {tentativa+1}: Aguardando dados do front para {payload}...")
-            await asyncio.sleep(1.5)
+            logger.info(f"⏳ Tentativa {tentativa+1}/10: Aguardando tracking de {payload}...")
+            await asyncio.sleep(2.0)
 
         if tracking_str:
             try:
-                # ast.literal_eval é mais seguro que eval para strings/dicts
                 tracking_data = ast.literal_eval(tracking_str)
 
-                # SALVA OS DADOS VINCULADOS AO UID REAL DO TELEGRAM
-                # Agora o montar_user_data(uid) vai encontrar!
                 if "fbp" in tracking_data:
                     r.set(f"fbp:{uid}", tracking_data["fbp"], ex=604800)
                 if "fbc" in tracking_data:
@@ -164,9 +158,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if "client_user_agent" in tracking_data:
                     r.set(f"ua:{uid}", tracking_data["client_user_agent"], ex=604800)
 
-                # Limpa a chave temporária para não poluir o Redis
                 r.delete(temp_key)
-                
                 logger.info(f"✅ [SUCESSO] Dados vinculados para UID {uid}")
                 enviar_lead_capi(uid, "start_com_tracking")
 
@@ -174,7 +166,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"❌ Erro ao processar tracking data: {e}")
                 enviar_lead_capi(uid, "start_erro_tracking")
         else:
-            logger.warning(f"⚠️ [AVISO] Payload {payload} não encontrado no Redis após 3 tentativas.")
+            logger.warning(f"⚠️ [AVISO] Payload {payload} não chegou no Redis após 20 segundos.")
             enviar_lead_capi(uid, "start_sem_chave")
     else:
         logger.info(f"ℹ️ [START] Direto sem tracking para UID {uid}")
@@ -188,10 +180,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cb_data = (query.data or "").lower()
     logger.info(f"🖱️ [BOTÃO] User: {uid} | Clique: {cb_data}")
     
-    # Primeiro enviamos o Lead para garantir rastro
     enviar_lead_capi(uid, "button_click")
     
-    # Se for botão de compra, manda Checkout
     if any(x in cb_data for x in ["plan", "buy", "pix", "pay"]):
         enviar_initiatecheckout_capi(uid)
 
@@ -226,42 +216,33 @@ threading.Thread(target=run_bot, daemon=True).start()
 # ====================== ROUTES ======================
 @app.route('/apex-tracking', methods=['GET'])
 def apex_tracking():
-    # 1. Captura o UID enviado pelo Front-end
     uid = request.args.get('uid')
     if not uid:
-        uid = f"track_{int(time.time())}"
+        return jsonify({"error": "uid não fornecido"}), 400
 
     fbclid = request.args.get('fbclid')
     fbp = request.args.get('fbp')
-    fbc = request.args.get('fbc') # Captura o FBC do front
-
-    # 2. Captura o IP e User-Agent REAIS da requisição
+    fbc = request.args.get('fbc') 
     client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
     client_user_agent = request.headers.get('User-Agent')
-
-    logger.info(f"[TRACKING RECEBIDO] uid={uid} | fbclid={fbclid} | fbp={fbp}")
 
     tracking_data = {}
 
     if fbp:
         tracking_data["fbp"] = fbp
-    
     if fbc:
         tracking_data["fbc"] = fbc
     elif fbclid:
-        creation_time = int(time.time() * 1000)
-        tracking_data["fbc"] = f"fb.1.{creation_time}.{fbclid}"
+        tracking_data["fbc"] = f"fb.1.{int(time.time() * 1000)}.{fbclid}"
 
     if client_ip:
         tracking_data["client_ip"] = client_ip.split(',')[0].strip()
-    
     if client_user_agent:
         tracking_data["client_user_agent"] = client_user_agent
 
-    # 3. Salva no Redis usando a chave do Front-end
     r.set(f"tracking:{uid}", str(tracking_data), ex=86400)
+    logger.info(f"💾 [TRACKING RECEBIDO E SALVO] uid={uid} | FBP: {bool(fbp)}")
     
-    # 4. Retorna JSON para o fetch do front-end
     return jsonify({"status": "ok", "uid": uid}), 200
 
 @app.route("/webhook", methods=["POST"])
