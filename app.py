@@ -22,7 +22,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN_APEX")
 REDIS_URL = os.getenv("REDIS_URL")
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL")
 PIXEL_ID = "735253462874774"
-ACCESS_TOKEN = "EAANRM9QJv7YBRG54vW9VkOT3rgEQDry96psCQTl0PZBRoIG7ElDCyMU7uO2idnf0nrebj4u3f7ZA396AGXCrBZC4NljW8OURxBu4qi5zGFZBEaWVtqlfwdZCoqGFeJ238YqE86c2tfwjdjBBJ52xLX3xZCh1sqwZDZD"
+# ✅ SEGURANÇA: Token agora vem das variáveis do Railway
+ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
 
 def hash_data(value: str) -> str:
     return hashlib.sha256(value.strip().lower().encode("utf-8")).hexdigest()
@@ -51,10 +52,9 @@ def montar_user_data(uid):
         logger.info(f"[montar_user_data] FBP incluído → {fbp[:50]}...")
 
     if fbc_raw:
-        creation_time = int(time.time() * 1000)  # milissegundos
-        fbc_formatted = f"fb.1.{creation_time}.{fbc_raw}"
-        user_data["fbc"] = [fbc_formatted]
-        logger.info(f"[montar_user_data] FBC formatado e incluído → {fbc_formatted[:100]}...")
+        # ✅ CORREÇÃO: FBC já vem formatado do tracking, apenas atribui
+        user_data["fbc"] = [fbc_raw]
+        logger.info(f"[montar_user_data] FBC já formatado usado → {fbc_raw[:100]}...")
 
     try:
         ua = request.headers.get('User-Agent', 'TelegramBot/1.0')
@@ -144,7 +144,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if payload.startswith("track_"):
         temp_key = payload
         tracking_str = r.get(f"tracking:{temp_key}")
-       
+        
         if tracking_str:
             try:
                 tracking_data = ast.literal_eval(tracking_str)
@@ -208,7 +208,10 @@ threading.Thread(target=run_bot, daemon=True).start()
 def apex_tracking():
     fbclid = request.args.get('fbclid')
     fbp = request.args.get('fbp')
-   
+
+    # 🔥 LOG PARA DEBUG: Rastreia a chegada dos parâmetros
+    logger.info(f"[TRACKING RECEBIDO] fbclid={fbclid} | fbp={fbp}")
+    
     temp_key = f"track_{int(time.time())}"
     tracking_data = {}
 
@@ -225,7 +228,7 @@ def apex_tracking():
     r.set(f"tracking:{temp_key}", str(tracking_data), ex=600)
 
     bot_url = f"https://t.me/Mayaoficial_bot?start={temp_key}"
-   
+    
     logger.info(f"[TRACKING] Redirecionando UID temporário → {temp_key}")
     return redirect(bot_url)
 
