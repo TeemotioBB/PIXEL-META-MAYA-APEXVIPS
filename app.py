@@ -22,7 +22,6 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN_APEX")
 REDIS_URL = os.getenv("REDIS_URL")
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL")
 PIXEL_ID = "735253462874774"
-# ✅ SEGURANÇA: Token agora vem das variáveis do Railway
 ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
 
 def hash_data(value: str) -> str:
@@ -49,12 +48,9 @@ def montar_user_data(uid):
 
     if fbp:
         user_data["fbp"] = [fbp]
-        logger.info(f"[montar_user_data] FBP incluído → {fbp[:50]}...")
 
     if fbc_raw:
-        # ✅ CORREÇÃO: FBC já vem formatado do tracking, apenas atribui
         user_data["fbc"] = [fbc_raw]
-        logger.info(f"[montar_user_data] FBC já formatado usado → {fbc_raw[:100]}...")
 
     try:
         ua = request.headers.get('User-Agent', 'TelegramBot/1.0')
@@ -66,13 +62,7 @@ def montar_user_data(uid):
 
 # ====================== CAPI FUNCTIONS ======================
 def enviar_lead_capi(uid: int, trigger: str):
-    #redis_key = f"lead_sent:{uid}:{date.today()}"
-    #if r.exists(redis_key):
-        #return
-    #r.set(redis_key, "1", ex=86400)
-
     user_data = montar_user_data(uid)
-
     payload = {
         "data": [{
             "event_name": "Lead",
@@ -141,17 +131,8 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"[START] UID: {uid} | Payload: {payload}")
 
-    async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    args = context.args
-    payload = " ".join(args) if args else ""
-
-    logger.info(f"[START] UID: {uid} | Payload: {payload}")
-
     if payload.startswith("track_"):
         temp_key = payload
-
-        # tenta buscar no Redis
         tracking_str = r.get(f"tracking:{temp_key}")
 
         if not tracking_str:
@@ -171,8 +152,6 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.info(f"✅ FBC salvo para UID {uid}")
 
                 r.delete(f"tracking:{temp_key}")
-
-                # 🔥 DISPARO IMEDIATO APÓS SALVAR
                 enviar_lead_capi(uid, "start_com_tracking")
 
             except Exception as e:
@@ -181,13 +160,10 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             logger.warning(f"[START] Chave temporária não encontrada: {temp_key}")
             enviar_lead_capi(uid, "start_sem_chave")
-
     else:
-        logger.info("[START] Nenhum parâmetro de tracking recebido (acesso direto)")
+        logger.info("[START] Nenhum parâmetro de tracking recebido")
         enviar_lead_capi(uid, "start_direto")
 
-    # ✅ O FINAL DA FUNÇÃO FICA VAZIO (SEM O SLEEP E SEM O ENVIAR_LEAD QUE ESTAVA AQUI)
-# ====================== BUTTON E MESSAGE HANDLERS ======================
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = query.from_user.id
@@ -227,8 +203,6 @@ threading.Thread(target=run_bot, daemon=True).start()
 def apex_tracking():
     fbclid = request.args.get('fbclid')
     fbp = request.args.get('fbp')
-
-    # LOG de entrada
     logger.info(f"[TRACKING RECEBIDO] fbclid={fbclid} | fbp={fbp}")
 
     temp_key = f"track_{int(time.time())}"
@@ -236,22 +210,13 @@ def apex_tracking():
 
     if fbp:
         tracking_data["fbp"] = fbp
-        logger.info(f"[TRACKING] FBP recebido e salvo → {fbp[:50]}...")
-
     if fbclid:
         creation_time = int(time.time() * 1000)
         fbc_formatted = f"fb.1.{creation_time}.{fbclid}"
         tracking_data["fbc"] = fbc_formatted
-        logger.info(f"[TRACKING] FBC gerado → {fbc_formatted[:100]}...")
 
-    # salva no Redis
     r.set(f"tracking:{temp_key}", str(tracking_data), ex=86400)
-
-    # 🔥 REDIRECIONA PARA LANDING COM UID
     bot_url = f"https://t.me/Mayaoficial_bot?start={temp_key}"
-
-    logger.info(f"[TRACKING] Redirecionando UID temporário → {temp_key}")
-
     return redirect(bot_url)
 
 @app.route("/webhook", methods=["POST"])
