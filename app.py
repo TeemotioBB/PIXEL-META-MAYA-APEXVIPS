@@ -151,12 +151,6 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"🚀 [START] User: {uid} | Payload: '{payload}'")
 
-    # ✅ Debug temporário
-    if payload:
-        chave = f"tracking:{payload}"
-        existe = r.exists(chave)
-        valor = r.get(chave)
-        logger.info(f"🔍 [DEBUG] Chave Redis '{chave}' → existe: {existe} | valor: {valor}")
 
     if payload.startswith("track_"):
         temp_key = f"tracking:{payload}"
