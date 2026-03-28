@@ -143,19 +143,23 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if payload.startswith("track_"):
         temp_key = payload
+        # Tenta buscar, se não achar, espera 1 segundo e tenta de novo
         tracking_str = r.get(f"tracking:{temp_key}")
+        if not tracking_str:
+            await asyncio.sleep(1)
+            tracking_str = r.get(f"tracking:{temp_key}")
         
         if tracking_str:
             try:
                 tracking_data = ast.literal_eval(tracking_str)
 
                 if "fbp" in tracking_data:
-                    r.set(f"fbp:{uid}", tracking_data["fbp"], ex=259200)
-                    logger.info(f"✅ FBP salvo (via tracking) para UID {uid}")
+                    r.set(f"fbp:{uid}", tracking_data["fbp"], ex=604800) # Agora dura 7 dias
+                    logger.info(f"✅ FBP salvo para UID {uid}")
 
                 if "fbc" in tracking_data:
-                    r.set(f"fbclid:{uid}", tracking_data["fbc"], ex=259200)
-                    logger.info(f"✅ FBC salvo (já formatado) para UID {uid}")
+                    r.set(f"fbclid:{uid}", tracking_data["fbc"], ex=604800) # Agora dura 7 dias
+                    logger.info(f"✅ FBC salvo para UID {uid}")
 
                 r.delete(f"tracking:{temp_key}")
             except Exception as e:
@@ -225,7 +229,7 @@ def apex_tracking():
         tracking_data["fbc"] = fbc_formatted
         logger.info(f"[TRACKING] FBC gerado → {fbc_formatted[:100]}...")
 
-    r.set(f"tracking:{temp_key}", str(tracking_data), ex=600)
+    r.set(f"tracking:{temp_key}", str(tracking_data), ex=86400)
 
     bot_url = f"https://t.me/Mayaoficial_bot?start={temp_key}"
     
