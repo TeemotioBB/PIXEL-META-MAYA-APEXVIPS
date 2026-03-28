@@ -149,19 +149,27 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     payload = args[0] if args else ""
 
-    logger.info(f"🚀 [START] User: {uid} | Payload: {payload}")
+    logger.info(f"🚀 [START] User: {uid} | Payload: '{payload}'")
+
+    # ✅ Debug temporário
+    if payload:
+        chave = f"tracking:{payload}"
+        existe = r.exists(chave)
+        valor = r.get(chave)
+        logger.info(f"🔍 [DEBUG] Chave Redis '{chave}' → existe: {existe} | valor: {valor}")
 
     if payload.startswith("track_"):
         temp_key = f"tracking:{payload}"
         tracking_str = None
 
-        # SUPER-LOOP: Tenta buscar 10 vezes (20 segundos no total)
         for tentativa in range(10):
             tracking_str = r.get(temp_key)
             if tracking_str:
                 break
             logger.info(f"⏳ Tentativa {tentativa+1}/10: Aguardando tracking de {payload}...")
             await asyncio.sleep(2.0)
+        
+        # ... resto continua igual
 
         if tracking_str:
             try:
