@@ -127,26 +127,34 @@ def enviar_purchase_capi(uid: int, valor: float):
         logger.error(f"❌ Erro Purchase: {e}")
 
 # ====================== HANDLERS ======================
+# ====================== HANDLERS ======================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     args = context.args
-    payload = " ".join(args) if args else ""
+    payload = args[0] if args else "" # Pega o track_... se existir
 
-    logger.info(f"[START] UID: {uid} | Payload: {payload}")
+    logger.info(f"🚀 [START] User: {uid} | Payload: {payload}")
 
     if payload.startswith("track_"):
-        temp_key = payload
-        tracking_str = r.get(f"tracking:{temp_key}")
-
-        if not tracking_str:
-            await asyncio.sleep(1)
-            tracking_str = r.get(f"tracking:{temp_key}")
+        temp_key = f"tracking:{payload}"
+        tracking_str = None
+        
+        # TENTA BUSCAR 3 VEZES (com intervalo de 1s)
+        # Isso resolve o problema de o bot ser mais rápido que o fetch do site
+        for tentativa in range(3):
+            tracking_str = r.get(temp_key)
+            if tracking_str:
+                break
+            logger.info(f"⏳ Tentativa {tentativa+1}: Aguardando dados do front para {payload}...")
+            await asyncio.sleep(1.5)
 
         if tracking_str:
             try:
+                # ast.literal_eval é mais seguro que eval para strings/dicts
                 tracking_data = ast.literal_eval(tracking_str)
 
-                # Salva os dados de tracking no Redis por 7 dias
+                # SALVA OS DADOS VINCULADOS AO UID REAL DO TELEGRAM
+                # Agora o montar_user_data(uid) vai encontrar!
                 if "fbp" in tracking_data:
                     r.set(f"fbp:{uid}", tracking_data["fbp"], ex=604800)
                 if "fbc" in tracking_data:
@@ -156,32 +164,44 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if "client_user_agent" in tracking_data:
                     r.set(f"ua:{uid}", tracking_data["client_user_agent"], ex=604800)
 
-                r.delete(f"tracking:{temp_key}")
+                # Limpa a chave temporária para não poluir o Redis
+                r.delete(temp_key)
+                
+                logger.info(f"✅ [SUCESSO] Dados vinculados para UID {uid}")
                 enviar_lead_capi(uid, "start_com_tracking")
 
             except Exception as e:
                 logger.error(f"❌ Erro ao processar tracking data: {e}")
                 enviar_lead_capi(uid, "start_erro_tracking")
         else:
-            logger.warning(f"[START] Chave temporária não encontrada: {temp_key}")
+            logger.warning(f"⚠️ [AVISO] Payload {payload} não encontrado no Redis após 3 tentativas.")
             enviar_lead_capi(uid, "start_sem_chave")
     else:
-        logger.info("[START] Nenhum parâmetro de tracking recebido")
+        logger.info(f"ℹ️ [START] Direto sem tracking para UID {uid}")
         enviar_lead_capi(uid, "start_direto")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = query.from_user.id
     await query.answer()
+    
     cb_data = (query.data or "").lower()
+    logger.info(f"🖱️ [BOTÃO] User: {uid} | Clique: {cb_data}")
+    
+    # Primeiro enviamos o Lead para garantir rastro
     enviar_lead_capi(uid, "button_click")
+    
+    # Se for botão de compra, manda Checkout
     if any(x in cb_data for x in ["plan", "buy", "pix", "pay"]):
         enviar_initiatecheckout_capi(uid)
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = (update.message.text or "").lower()
+    
+    logger.info(f"💬 [MENSAGEM] User: {uid}")
     enviar_lead_capi(uid, "chat")
+    
     if "pagar com pix" in text or "plano selecionado" in text:
         enviar_initiatecheckout_capi(uid)
 
