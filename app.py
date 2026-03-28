@@ -36,19 +36,19 @@ except Exception as e:
     logger.error(f"❌ Erro Redis: {e}")
     raise
 
-# ====================== USER DATA (CAPI) ======================
+# ====================== USER DATA ======================
 def montar_user_data(uid):
     """Busca dados no Redis e monta o dicionário user_data para a Meta"""
     user_data = {"external_id": [hash_data(str(uid))]}
 
-    # ✅ IMPORTANTE: As chaves devem bater com o que o start_handler salva
     fbp = r.get(f"fbp:{uid}")
     fbc_raw = r.get(f"fbclid:{uid}")
 
-    logger.info(f"[montar_user_data] UID {uid} | FBP: {bool(fbp)} | FBC: {bool(fbc_raw)}")
+    logger.info(f"[montar_user_data] UID {uid} → FBP encontrado: {bool(fbp)} | FBC encontrado: {bool(fbc_raw)}")
 
     if fbp:
         user_data["fbp"] = [fbp]
+
     if fbc_raw:
         user_data["fbc"] = [fbc_raw]
 
@@ -82,7 +82,8 @@ def enviar_lead_capi(uid: int, trigger: str):
 
 def enviar_initiatecheckout_capi(uid: int):
     redis_key = f"checkout_sent:{uid}"
-    if r.exists(redis_key): return
+    if r.exists(redis_key):
+        return
     r.set(redis_key, "1", ex=3600)
 
     user_data = montar_user_data(uid)
@@ -122,44 +123,46 @@ def enviar_purchase_capi(uid: int, valor: float):
     except Exception as e:
         logger.error(f"❌ Erro Purchase: {e}")
 
-# ====================== BOT HANDLERS ======================
+# ====================== HANDLERS ======================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     args = context.args
-    payload = args[0] if args else ""
+    payload = " ".join(args) if args else ""
 
     logger.info(f"[START] UID: {uid} | Payload: {payload}")
 
-    # ✅ PROCESSO DE TRACKING: Vincula temp_key -> UID
     if payload.startswith("track_"):
         temp_key = payload
         tracking_str = r.get(f"tracking:{temp_key}")
+
+        if not tracking_str:
+            await asyncio.sleep(1)
+            tracking_str = r.get(f"tracking:{temp_key}")
 
         if tracking_str:
             try:
                 tracking_data = ast.literal_eval(tracking_str)
 
-                # Salva os dados vinculados ao UID do Telegram para uso futuro (Checkout/Purchase)
                 if "fbp" in tracking_data:
-                    r.set(f"fbp:{uid}", tracking_data["fbp"], ex=604800) # 7 dias
-                    logger.info(f"✅ FBP vinculado ao UID {uid}")
+                    r.set(f"fbp:{uid}", tracking_data["fbp"], ex=604800)
+                    logger.info(f"✅ FBP salvo para UID {uid}")
 
                 if "fbc" in tracking_data:
-                    # ✅ SALVA COMO 'fbclid' para alinhar com o montar_user_data
                     r.set(f"fbclid:{uid}", tracking_data["fbc"], ex=604800)
-                    logger.info(f"✅ FBC vinculado ao UID {uid}")
+                    logger.info(f"✅ FBC salvo para UID {uid}")
 
-                # Deleta a chave temporária para limpar o Redis
                 r.delete(f"tracking:{temp_key}")
+                enviar_lead_capi(uid, "start_com_tracking")
 
             except Exception as e:
                 logger.error(f"❌ Erro ao processar tracking data: {e}")
+                enviar_lead_capi(uid, "start_erro_tracking")
         else:
-            logger.warning(f"[START] Tracking expirado ou não encontrado: {temp_key}")
-
-    # Pequeno fôlego para o Redis consolidar antes de enviar o Lead
-    await asyncio.sleep(0.5)
-    enviar_lead_capi(uid, "start")
+            logger.warning(f"[START] Chave temporária não encontrada: {temp_key}")
+            enviar_lead_capi(uid, "start_sem_chave")
+    else:
+        logger.info("[START] Nenhum parâmetro de tracking recebido")
+        enviar_lead_capi(uid, "start_direto")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -195,32 +198,24 @@ def run_bot():
 
 threading.Thread(target=run_bot, daemon=True).start()
 
-# ====================== FLASK ROUTES ======================
+# ====================== ROUTES ======================
 @app.route('/apex-tracking', methods=['GET'])
 def apex_tracking():
     fbclid = request.args.get('fbclid')
     fbp = request.args.get('fbp')
-
     logger.info(f"[TRACKING RECEBIDO] fbclid={fbclid} | fbp={fbp}")
 
-    # Chave temporária que será passada via ?start=track_...
     temp_key = f"track_{int(time.time())}"
     tracking_data = {}
 
     if fbp:
         tracking_data["fbp"] = fbp
-
     if fbclid:
         creation_time = int(time.time() * 1000)
-        # Formata o FBC no padrão oficial da Meta
-        tracking_data["fbc"] = f"fb.1.{creation_time}.{fbclid}"
+        fbc_formatted = f"fb.1.{creation_time}.{fbclid}"
+        tracking_data["fbc"] = fbc_formatted
 
-    # ✅ SALVA POR 3 DIAS (259200 segundos)
-    if tracking_data:
-        r.set(f"tracking:{temp_key}", str(tracking_data), ex=259200)
-        logger.info(f"📡 Rastro temporário criado: {temp_key}")
-
-    # Redireciona para o bot com o parâmetro de tracking
+    r.set(f"tracking:{temp_key}", str(tracking_data), ex=86400)
     bot_url = f"https://t.me/Mayaoficial_bot?start={temp_key}"
     return redirect(bot_url)
 
@@ -242,26 +237,26 @@ def apex_webhook():
     evento = data.get("event")
     uid = data.get("customer", {}).get("chat_id")
     val_raw = data.get("transaction", {}).get("plan_value", 0)
-    
-    if not uid: return "ok", 200
-    
+    if not uid: 
+        return "ok", 200
     if evento == "user_joined": 
         enviar_lead_capi(uid, "apex_joined")
     elif evento == "payment_created": 
         enviar_initiatecheckout_capi(uid)
     elif evento == "payment_approved": 
         enviar_purchase_capi(uid, float(val_raw)/100)
-    
     return "ok", 200
 
 @app.route("/set-webhook", methods=["GET"])
 def set_webhook():
     url = f"{WEBHOOK_BASE_URL.rstrip('/')}/webhook"
     try:
-        async def s(): await application.bot.set_webhook(url)
+        async def s(): 
+            await application.bot.set_webhook(url)
         asyncio.run_coroutine_threadsafe(s(), bot_loop).result()
         return f"✅ Webhook configurado: {url}", 200
-    except Exception as e: return str(e), 500
+    except Exception as e: 
+        return str(e), 500
 
 @app.route("/", methods=["GET"])
 def home(): 
