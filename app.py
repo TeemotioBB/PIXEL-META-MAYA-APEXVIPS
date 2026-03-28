@@ -151,6 +151,16 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(1)
             tracking_str = r.get(f"tracking:{temp_key}")
 
+        if payload.startswith("track_"):
+        temp_key = payload
+
+        # tenta buscar no Redis
+        tracking_str = r.get(f"tracking:{temp_key}")
+
+        if not tracking_str:
+            await asyncio.sleep(1)
+            tracking_str = r.get(f"tracking:{temp_key}")
+
         if tracking_str:
             try:
                 tracking_data = ast.literal_eval(tracking_str)
@@ -165,19 +175,21 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 r.delete(f"tracking:{temp_key}")
 
+                # 🔥 DISPARO IMEDIATO APÓS SALVAR
+                enviar_lead_capi(uid, "start_com_tracking")
+
             except Exception as e:
                 logger.error(f"❌ Erro ao processar tracking data: {e}")
-
+                enviar_lead_capi(uid, "start_erro_tracking")
         else:
             logger.warning(f"[START] Chave temporária não encontrada: {temp_key}")
+            enviar_lead_capi(uid, "start_sem_chave")
 
     else:
         logger.info("[START] Nenhum parâmetro de tracking recebido (acesso direto)")
+        enviar_lead_capi(uid, "start_direto")
 
-    await asyncio.sleep(0.3)
-
-    enviar_lead_capi(uid, "start")
-
+    # ✅ O FINAL DA FUNÇÃO FICA VAZIO (SEM O SLEEP E SEM O ENVIAR_LEAD QUE ESTAVA AQUI)
 # ====================== BUTTON E MESSAGE HANDLERS ======================
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
