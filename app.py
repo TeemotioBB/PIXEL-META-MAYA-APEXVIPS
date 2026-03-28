@@ -9,30 +9,10 @@ import requests
 import redis
 import ast
 
-r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
-
-def vincular_tracking(uid_real, uid_track):
-    tracking_str = r.get(f"tracking:{uid_track}")
-    if tracking_str:
-        tracking_data = ast.literal_eval(tracking_str)
-        if "fbp" in tracking_data:
-            r.set(f"fbp:{uid_real}", tracking_data["fbp"], ex=604800)
-        if "fbc" in tracking_data:
-            r.set(f"fbc:{uid_real}", tracking_data["fbc"], ex=604800)
-        if "client_ip" in tracking_data:
-            r.set(f"ip:{uid_real}", tracking_data["client_ip"], ex=604800)
-        if "client_user_agent" in tracking_data:
-            r.set(f"ua:{uid_real}", tracking_data["client_user_agent"], ex=604800)
-        r.delete(f"tracking:{uid_track}")
-        return True
-    return False
-
 from datetime import date
 from flask import Flask, request, jsonify
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes
-
-app = Flask(__name__)
 
 # ====================== LOGGING ======================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -57,15 +37,35 @@ except Exception as e:
     logger.error(f"❌ Erro Redis: {e}")
     raise
 
+# ====================== VINCULAR TRACKING (apex-webhook) ======================
+def vincular_tracking(uid_real, uid_track):
+    """Vincula dados de tracking temporários ao UID real do Telegram"""
+    tracking_str = r.get(f"tracking:{uid_track}")
+    if tracking_str:
+        tracking_data = ast.literal_eval(tracking_str)
+        if "fbp" in tracking_data:
+            r.set(f"fbp:{uid_real}", tracking_data["fbp"], ex=604800)
+        # ✅ FIX: chave padronizada para fbc:{uid}
+        if "fbc" in tracking_data:
+            r.set(f"fbc:{uid_real}", tracking_data["fbc"], ex=604800)
+        if "client_ip" in tracking_data:
+            r.set(f"ip:{uid_real}", tracking_data["client_ip"], ex=604800)
+        if "client_user_agent" in tracking_data:
+            r.set(f"ua:{uid_real}", tracking_data["client_user_agent"], ex=604800)
+        r.delete(f"tracking:{uid_track}")
+        return True
+    return False
+
 # ====================== USER DATA ======================
 def montar_user_data(uid):
     """Busca dados no Redis e monta o dicionário user_data para a Meta com IP e UA reais"""
     user_data = {"external_id": [hash_data(str(uid))]}
 
-    fbp = r.get(f"fbp:{uid}")
-    fbc_raw = r.get(f"fbclid:{uid}")
-    ip = r.get(f"ip:{uid}")
-    ua = r.get(f"ua:{uid}")
+    fbp     = r.get(f"fbp:{uid}")
+    # ✅ FIX: era fbclid:{uid} — padronizado para fbc:{uid} em todo o projeto
+    fbc_raw = r.get(f"fbc:{uid}")
+    ip      = r.get(f"ip:{uid}")
+    ua      = r.get(f"ua:{uid}")
 
     logger.info(f"[montar_user_data] UID {uid} → FBP: {bool(fbp)} | FBC: {bool(fbc_raw)} | IP: {bool(ip)} | UA: {bool(ua)}")
 
@@ -75,12 +75,9 @@ def montar_user_data(uid):
         user_data["fbc"] = fbc_raw
     if ip:
         user_data["client_ip_address"] = ip
-    
-    if ua:
-        user_data["client_user_agent"] = ua
-    else:
-        user_data["client_user_agent"] = "TelegramBot/1.0"
-        
+
+    user_data["client_user_agent"] = ua if ua else "TelegramBot/1.0"
+
     return user_data
 
 # ====================== CAPI FUNCTIONS ======================
@@ -150,14 +147,14 @@ def enviar_purchase_capi(uid: int, valor: float):
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     args = context.args
-    payload = args[0] if args else "" 
+    payload = args[0] if args else ""
 
     logger.info(f"🚀 [START] User: {uid} | Payload: {payload}")
 
     if payload.startswith("track_"):
         temp_key = f"tracking:{payload}"
         tracking_str = None
-        
+
         # SUPER-LOOP: Tenta buscar 10 vezes (20 segundos no total)
         for tentativa in range(10):
             tracking_str = r.get(temp_key)
@@ -172,8 +169,9 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 if "fbp" in tracking_data:
                     r.set(f"fbp:{uid}", tracking_data["fbp"], ex=604800)
+                # ✅ FIX: era fbclid:{uid} — padronizado para fbc:{uid}
                 if "fbc" in tracking_data:
-                    r.set(f"fbclid:{uid}", tracking_data["fbc"], ex=604800)
+                    r.set(f"fbc:{uid}", tracking_data["fbc"], ex=604800)
                 if "client_ip" in tracking_data:
                     r.set(f"ip:{uid}", tracking_data["client_ip"], ex=604800)
                 if "client_user_agent" in tracking_data:
@@ -197,22 +195,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = query.from_user.id
     await query.answer()
-    
+
     cb_data = (query.data or "").lower()
     logger.info(f"🖱️ [BOTÃO] User: {uid} | Clique: {cb_data}")
-    
+
     enviar_lead_capi(uid, "button_click")
-    
+
     if any(x in cb_data for x in ["plan", "buy", "pix", "pay"]):
         enviar_initiatecheckout_capi(uid)
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     text = (update.message.text or "").lower()
-    
+
     logger.info(f"💬 [MENSAGEM] User: {uid}")
     enviar_lead_capi(uid, "chat")
-    
+
     if "pagar com pix" in text or "plano selecionado" in text:
         enviar_initiatecheckout_capi(uid)
 
@@ -243,7 +241,7 @@ def apex_tracking():
 
     fbclid = request.args.get('fbclid')
     fbp = request.args.get('fbp')
-    fbc = request.args.get('fbc') 
+    fbc = request.args.get('fbc')
     client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
     client_user_agent = request.headers.get('User-Agent')
 
@@ -263,7 +261,7 @@ def apex_tracking():
 
     r.set(f"tracking:{uid}", str(tracking_data), ex=86400)
     logger.info(f"💾 [TRACKING RECEBIDO E SALVO] uid={uid} | FBP: {bool(fbp)}")
-    
+
     return jsonify({"status": "ok", "uid": uid}), 200
 
 @app.route("/webhook", methods=["POST"])
@@ -278,26 +276,25 @@ def webhook():
         logger.error(f"❌ Erro Webhook: {e}")
         return "error", 500
 
-# ====================== CORREÇÃO AQUI ======================
 @app.route('/apex-webhook', methods=['POST'])
 def apex_webhook():
     data = request.get_json() or {}
     evento = data.get("event")
     uid = data.get("customer", {}).get("chat_id")
     val_raw = data.get("transaction", {}).get("plan_value", 0)
-    uid_track = data.get("tracking_uid")  # 🔹 precisa vir do front ou mapeamento
+    uid_track = data.get("tracking_uid")
 
-    if not uid: 
+    if not uid:
         return "ok", 200
 
     if evento == "user_joined":
         if uid_track:
-            vincular_tracking(uid, uid_track)  # 🔹 vincula dados do tracking
+            vincular_tracking(uid, uid_track)
         enviar_lead_capi(uid, "apex_joined")
     elif evento == "payment_created":
         enviar_initiatecheckout_capi(uid)
     elif evento == "payment_approved":
-        enviar_purchase_capi(uid, float(val_raw)/100)
+        enviar_purchase_capi(uid, float(val_raw) / 100)
 
     return "ok", 200
 
@@ -305,15 +302,15 @@ def apex_webhook():
 def set_webhook():
     url = f"{WEBHOOK_BASE_URL.rstrip('/')}/webhook"
     try:
-        async def s(): 
+        async def s():
             await application.bot.set_webhook(url)
         asyncio.run_coroutine_threadsafe(s(), bot_loop).result()
         return f"✅ Webhook configurado: {url}", 200
-    except Exception as e: 
+    except Exception as e:
         return str(e), 500
 
 @app.route("/", methods=["GET"])
-def home(): 
+def home():
     return "Bot Online", 200
 
 if __name__ == "__main__":
