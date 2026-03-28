@@ -179,7 +179,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if "client_user_agent" in tracking_data:
                     r.set(f"ua:{uid}", tracking_data["client_user_agent"], ex=604800)
 
-                r.delete(temp_key)
+                r.expire(temp_key, 300)
                 logger.info(f"✅ [SUCESSO] Dados vinculados para UID {uid}")
                 enviar_lead_capi(uid, "start_com_tracking")
 
