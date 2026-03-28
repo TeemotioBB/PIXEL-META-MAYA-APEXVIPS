@@ -269,14 +269,16 @@ threading.Thread(target=run_bot, daemon=True).start()
 @app.route('/apex-tracking', methods=['GET'])
 def apex_tracking():
     uid = request.args.get('uid')
-    if not uid:
-        return jsonify({"error": "uid não fornecido"}), 400
+    uid_real = request.args.get('uid_real')  # ← novo
 
-    user_agent = request.headers.get('User-Agent', '')
-    bots = ['vercel-screenshot', 'HeadlessChrome', 'Googlebot', 'bingbot', 'facebookexternalhit']
-    if any(bot.lower() in user_agent.lower() for bot in bots):
-        logger.info(f"🤖 [BOT BLOQUEADO] uid={uid} | UA: {user_agent[:60]}")
-        return jsonify({"status": "ignored", "reason": "bot"}), 200
+    # Se veio uid_real, faz o vínculo direto
+    if uid_real and uid:
+        tracking_str = r.get(f"tracking:{uid}")
+        if tracking_str:
+            vincular_tracking_por_uid_temp(int(uid_real), uid)
+            r.set(f"bridge:{uid}", str(uid_real), ex=3600)
+            logger.info(f"✅ [LOGIN WIDGET] {uid} → {uid_real} vinculado")
+        return jsonify({"status": "ok", "vinculo": True}), 200
 
     fbclid            = request.args.get('fbclid')
     fbp               = request.args.get('fbp')
