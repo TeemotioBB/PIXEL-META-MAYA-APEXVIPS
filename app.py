@@ -141,6 +141,25 @@ def enviar_purchase_capi(uid: int, valor: float):
     except Exception as e:
         logger.error(f"❌ Erro Purchase: {e}")
 
+# ====================== APEX JOINED COM RETRY ======================
+def apex_joined_com_retry(uid: int):
+    """
+    Aguarda até 30s para o /start vincular os dados de tracking.
+    A ApexVIPs dispara user_joined ANTES do Telegram processar o /start,
+    então esperamos o fbp:{uid} aparecer no Redis antes de enviar o Lead.
+    """
+    for tentativa in range(15):
+        fbp = r.get(f"fbp:{uid}")
+        if fbp:
+            logger.info(f"✅ [APEX JOINED] Dados vinculados para UID {uid} na tentativa {tentativa+1} — enviando Lead")
+            break
+        logger.info(f"⏳ [APEX JOINED] Aguardando /start vincular dados para UID {uid} — tentativa {tentativa+1}/15")
+        time.sleep(2)
+    else:
+        logger.warning(f"⚠️ [APEX JOINED] Dados NÃO chegaram em 30s para UID {uid} — enviando Lead sem tracking")
+
+    enviar_lead_capi(uid, "apex_joined")
+
 # ====================== HANDLERS ======================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -183,7 +202,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"❌ Erro ao processar tracking data: {e}")
                 enviar_lead_capi(uid, "start_erro_tracking")
         else:
-            # ✅ RETRO-VÍNCULO: guarda uid real para quando o tracking chegar depois
+            # RETRO-VÍNCULO: guarda uid real para quando o tracking chegar depois
             logger.warning(f"⚠️ [AVISO] Payload {payload} não chegou em 20s — salvando pending_uid para retro-vínculo")
             r.set(f"pending_uid:{payload}", str(uid), ex=300)
             enviar_lead_capi(uid, "start_sem_chave")
@@ -239,16 +258,16 @@ def apex_tracking():
     if not uid:
         return jsonify({"error": "uid não fornecido"}), 400
 
-    # ✅ Bloqueia bots de crawler/preview
+    # Bloqueia bots de crawler/preview
     user_agent = request.headers.get('User-Agent', '')
     bots = ['vercel-screenshot', 'HeadlessChrome', 'Googlebot', 'bingbot', 'facebookexternalhit']
     if any(bot.lower() in user_agent.lower() for bot in bots):
         logger.info(f"🤖 [BOT BLOQUEADO] uid={uid} | UA: {user_agent[:60]}")
         return jsonify({"status": "ignored", "reason": "bot"}), 200
 
-    fbclid = request.args.get('fbclid')
-    fbp    = request.args.get('fbp')
-    fbc    = request.args.get('fbc')
+    fbclid            = request.args.get('fbclid')
+    fbp               = request.args.get('fbp')
+    fbc               = request.args.get('fbc')
     client_ip         = request.headers.get('X-Forwarded-For', request.remote_addr)
     client_user_agent = request.headers.get('User-Agent')
 
@@ -267,7 +286,7 @@ def apex_tracking():
     r.set(f"tracking:{uid}", str(tracking_data), ex=86400)
     logger.info(f"💾 [TRACKING RECEBIDO E SALVO] uid={uid} | FBP: {bool(fbp)}")
 
-    # ✅ RETRO-VÍNCULO: se o /start já desistiu de esperar, vincula agora e reenvia Lead
+    # RETRO-VÍNCULO: se o /start já desistiu de esperar, vincula agora e reenvia Lead
     uid_real = r.get(f"pending_uid:{uid}")
     if uid_real:
         logger.info(f"🔁 [RETRO-VÍNCULO] Tracking chegou tarde — vinculando para UID {uid_real}")
@@ -298,29 +317,20 @@ def webhook():
 
 @app.route('/apex-webhook', methods=['POST'])
 def apex_webhook():
-    data = request.get_json() or {}
+    data    = request.get_json() or {}
     evento  = data.get("event")
     uid     = data.get("customer", {}).get("chat_id")
     val_raw = data.get("transaction", {}).get("plan_value", 0)
-    uid_track = data.get("tracking_uid")
 
-    # LOG: mostra todo o payload recebido e os campos extraídos
     logger.info(f"[APEX WEBHOOK] Payload completo: {data}")
-    logger.info(f"[APEX WEBHOOK] Evento={evento} | chat_id={uid} | tracking_uid={uid_track}")
+    logger.info(f"[APEX WEBHOOK] Evento={evento} | chat_id={uid}")
 
     if not uid:
         return "ok", 200
 
     if evento == "user_joined":
-        if uid_track:
-            # Verifica se a chave existe no Redis antes de tentar vincular
-            chave_tracking = f"tracking:{uid_track}"
-            existe = r.exists(chave_tracking)
-            logger.info(f"[VÍNCULO] Tentando vincular {chave_tracking} → existe? {existe}")
-            vincular_tracking(uid, uid_track)
-        else:
-            logger.warning("[VÍNCULO] tracking_uid NÃO FOI ENVIADO no webhook!")
-        enviar_lead_capi(uid, "apex_joined")
+        # ✅ Roda em thread separada — aguarda até 30s pelo /start vincular os dados
+        threading.Thread(target=apex_joined_com_retry, args=(uid,), daemon=True).start()
 
     elif evento == "payment_created":
         logger.info(f"[PAYMENT CREATED] UID={uid} → enviando InitiateCheckout")
