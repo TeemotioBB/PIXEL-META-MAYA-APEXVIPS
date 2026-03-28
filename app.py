@@ -61,12 +61,34 @@ def montar_user_data(uid):
 
 # ====================== CAPI FUNCTIONS ======================
 def enviar_lead_capi(uid: int, trigger: str):
+    """
+    Envia Lead com trava de envio único por dia.
+    Se já foi enviado hoje COM tracking, não envia de novo.
+    Se foi enviado SEM tracking mas agora tem FBP, reenvia enriquecido.
+    """
+    lock_key = f"lead_sent:{uid}:{date.today()}"
+    lock_val = r.get(lock_key)
+
+    fbp_exists = bool(r.get(f"fbp:{uid}"))
+
+    if lock_val == "com_tracking":
+        logger.info(f"⏭️ [CAPI] Lead já enviado COM tracking hoje — UID: {uid} ignorado")
+        return
+
+    if lock_val == "sem_tracking" and not fbp_exists:
+        logger.info(f"⏭️ [CAPI] Lead já enviado SEM tracking e tracking ainda não chegou — UID: {uid} ignorado")
+        return
+
+    if lock_val == "sem_tracking" and fbp_exists:
+        trigger = f"{trigger}_enriquecido"
+        logger.info(f"🔄 [CAPI] Reenviando Lead enriquecido para UID: {uid}")
+
     user_data = montar_user_data(uid)
     payload = {
         "data": [{
             "event_name": "Lead",
             "event_time": int(time.time()),
-            "event_id": f"lead_{uid}_{date.today()}",  # mesmo event_id no mesmo dia = Meta deduplica
+            "event_id": f"lead_{uid}_{date.today()}_{trigger}",
             "action_source": "chat",
             "user_data": user_data,
             "custom_data": {"trigger": trigger}
@@ -75,7 +97,9 @@ def enviar_lead_capi(uid: int, trigger: str):
     }
     try:
         requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
-        logger.info(f"🟢 [CAPI] Lead ENVIADO | UID: {uid} | Trigger: {trigger}")
+        novo_lock = "com_tracking" if fbp_exists else "sem_tracking"
+        r.set(lock_key, novo_lock, ex=86400)
+        logger.info(f"🟢 [CAPI] Lead ENVIADO | UID: {uid} | Trigger: {trigger} | Lock: {novo_lock}")
     except Exception as e:
         logger.error(f"❌ Erro Lead: {e}")
 
@@ -122,21 +146,31 @@ def enviar_purchase_capi(uid: int, valor: float):
     except Exception as e:
         logger.error(f"❌ Erro Purchase: {e}")
 
-# ====================== FALLBACK: envia Lead se /start nunca vier ======================
+# ====================== VINCULAR TRACKING ======================
+def vincular_tracking_por_uid_temp(uid_real: int, uid_temp: str) -> bool:
+    tracking_str = r.get(f"tracking:{uid_temp}")
+    if not tracking_str:
+        return False
+    try:
+        tracking_data = ast.literal_eval(tracking_str)
+        if "fbp" in tracking_data:
+            r.set(f"fbp:{uid_real}", tracking_data["fbp"], ex=604800)
+        if "fbc" in tracking_data:
+            r.set(f"fbc:{uid_real}", tracking_data["fbc"], ex=604800)
+        if "client_ip" in tracking_data:
+            r.set(f"ip:{uid_real}", tracking_data["client_ip"], ex=604800)
+        if "client_user_agent" in tracking_data:
+            r.set(f"ua:{uid_real}", tracking_data["client_user_agent"], ex=604800)
+        r.expire(f"tracking:{uid_temp}", 300)
+        logger.info(f"✅ [VÍNCULO] {uid_temp} → UID {uid_real} | FBP: {bool(tracking_data.get('fbp'))}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Erro ao vincular tracking: {e}")
+        return False
+
+# ====================== APEX JOINED FALLBACK ======================
 def apex_joined_fallback(uid: int):
-    """
-    NOVA LÓGICA — sem corrida de 30s.
-
-    O /start agora é DONO do envio do Lead. Este fallback só dispara
-    se o /start não aparecer em 90 segundos (ex: usuário entrou
-    direto no bot sem usar o link de convite).
-
-    A flag `pending_join:{uid}` é deletada pelo /start assim que ele
-    envia o Lead. Se ainda existir depois de 90s, o /start não veio
-    e enviamos sem tracking.
-    """
     time.sleep(90)
-
     if r.get(f"pending_join:{uid}"):
         logger.warning(f"⚠️ [FALLBACK] /start não chegou em 90s para UID {uid} — enviando Lead sem tracking")
         r.delete(f"pending_join:{uid}")
@@ -153,55 +187,29 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"🚀 [START] User: {uid} | Payload: '{payload}'")
 
     if payload.startswith("track_"):
-        temp_key = f"tracking:{payload}"
-        tracking_str = None
+        temp_key = payload
 
-        # Tenta buscar 10 vezes (20 segundos no total)
+        tracking_str = None
         for tentativa in range(10):
-            tracking_str = r.get(temp_key)
+            tracking_str = r.get(f"tracking:{temp_key}")
             if tracking_str:
                 break
-            logger.info(f"⏳ Tentativa {tentativa+1}/10: Aguardando tracking de {payload}...")
+            logger.info(f"⏳ Tentativa {tentativa+1}/10: Aguardando tracking de {temp_key}...")
             await asyncio.sleep(2.0)
 
         if tracking_str:
-            try:
-                tracking_data = ast.literal_eval(tracking_str)
-
-                if "fbp" in tracking_data:
-                    r.set(f"fbp:{uid}", tracking_data["fbp"], ex=604800)
-                if "fbc" in tracking_data:
-                    r.set(f"fbc:{uid}", tracking_data["fbc"], ex=604800)
-                if "client_ip" in tracking_data:
-                    r.set(f"ip:{uid}", tracking_data["client_ip"], ex=604800)
-                if "client_user_agent" in tracking_data:
-                    r.set(f"ua:{uid}", tracking_data["client_user_agent"], ex=604800)
-
-                r.expire(temp_key, 300)
-                logger.info(f"✅ [SUCESSO] Dados vinculados para UID {uid} via payload {payload}")
-
-            except Exception as e:
-                logger.error(f"❌ Erro ao processar tracking data: {e}")
-
+            vincular_tracking_por_uid_temp(uid, temp_key)
         else:
-            # RETRO-VÍNCULO: guarda uid real para quando o tracking chegar depois
-            logger.warning(f"⚠️ [AVISO] Payload {payload} não chegou em 20s — salvando pending_uid para retro-vínculo")
-            r.set(f"pending_uid:{payload}", str(uid), ex=300)
+            logger.warning(f"⚠️ Tracking {temp_key} não chegou em 20s — salvando pending_uid")
+            r.set(f"pending_uid:{temp_key}", str(uid), ex=300)
 
-    # ── ENVIO DO LEAD ──────────────────────────────────────────────────────────
-    # O /start é SEMPRE responsável por enviar o Lead (com ou sem tracking).
-    # Ele também cancela o fallback do apex_joined deletando a flag pending_join.
-    # O event_id idêntico no mesmo dia garante deduplicação na Meta caso o
-    # fallback já tenha disparado em paralelo.
+        # Salva bridge: uid_temp → uid_real (permite retro-vínculo no apex-tracking)
+        r.set(f"bridge:{temp_key}", str(uid), ex=3600)
+        logger.info(f"🌉 [BRIDGE] bridge:{temp_key} → {uid} salvo")
 
-    fbp_exists = bool(r.get(f"fbp:{uid}"))
-    trigger = "start_com_tracking" if fbp_exists else "start_sem_tracking"
-
-    enviar_lead_capi(uid, trigger)
-
-    # Cancela o fallback do apex_joined (ele checa essa flag antes de enviar)
+    # /start cancela o fallback e envia o Lead (dono do envio)
     r.delete(f"pending_join:{uid}")
-    logger.info(f"🗑️ [START] pending_join:{uid} deletado — fallback cancelado")
+    enviar_lead_capi(uid, "start")
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -279,20 +287,20 @@ def apex_tracking():
     r.set(f"tracking:{uid}", str(tracking_data), ex=86400)
     logger.info(f"💾 [TRACKING RECEBIDO E SALVO] uid={uid} | FBP: {bool(fbp)}")
 
-    # RETRO-VÍNCULO: se o /start já desistiu de esperar, vincula agora e reenvia Lead
+    # RETRO-VÍNCULO via pending_uid (o /start desistiu de esperar)
     uid_real = r.get(f"pending_uid:{uid}")
     if uid_real:
-        logger.info(f"🔁 [RETRO-VÍNCULO] Tracking chegou tarde — vinculando para UID {uid_real}")
-        if fbp:
-            r.set(f"fbp:{uid_real}", fbp, ex=604800)
-        if tracking_data.get("fbc"):
-            r.set(f"fbc:{uid_real}", tracking_data["fbc"], ex=604800)
-        if tracking_data.get("client_ip"):
-            r.set(f"ip:{uid_real}", tracking_data["client_ip"], ex=604800)
-        if client_user_agent:
-            r.set(f"ua:{uid_real}", client_user_agent, ex=604800)
+        logger.info(f"🔁 [RETRO-VÍNCULO pending_uid] uid_temp={uid} → uid_real={uid_real}")
+        vincular_tracking_por_uid_temp(int(uid_real), uid)
         enviar_lead_capi(int(uid_real), "retro_tracking")
         r.delete(f"pending_uid:{uid}")
+
+    # RETRO-VÍNCULO via bridge (o /start já chegou, mas apex_joined veio depois)
+    uid_real_bridge = r.get(f"bridge:{uid}")
+    if uid_real_bridge and not uid_real:
+        logger.info(f"🌉 [RETRO-VÍNCULO bridge] uid_temp={uid} → uid_real={uid_real_bridge}")
+        vincular_tracking_por_uid_temp(int(uid_real_bridge), uid)
+        enviar_lead_capi(int(uid_real_bridge), "retro_bridge")
 
     return jsonify({"status": "ok", "uid": uid}), 200
 
@@ -322,24 +330,15 @@ def apex_webhook():
         return "ok", 200
 
     if evento == "user_joined":
-        # ─────────────────────────────────────────────────────────────────────
-        # NOVA LÓGICA:
-        #   1. Salva flag pending_join:{uid}
-        #   2. Inicia thread de fallback (90s)
-        #   3. O /start vai deletar a flag e enviar o Lead com tracking
-        #   4. Se o /start não vier em 90s, o fallback envia sem tracking
-        # ─────────────────────────────────────────────────────────────────────
-        r.set(f"pending_join:{uid}", "1", ex=300)  # 5 min de segurança
-        logger.info(f"🏁 [APEX JOINED] Flag pending_join:{uid} criada — aguardando /start por 90s")
+        r.set(f"pending_join:{uid}", "1", ex=300)
+        logger.info(f"🏁 [APEX JOINED] pending_join:{uid} criada — /start tem 90s")
         threading.Thread(target=apex_joined_fallback, args=(uid,), daemon=True).start()
 
     elif evento == "payment_created":
-        logger.info(f"[PAYMENT CREATED] UID={uid} → enviando InitiateCheckout")
         enviar_initiatecheckout_capi(uid)
 
     elif evento == "payment_approved":
         valor = float(val_raw) / 100
-        logger.info(f"[PAYMENT APPROVED] UID={uid} | valor R${valor:.2f} → enviando Purchase")
         enviar_purchase_capi(uid, valor)
 
     return "ok", 200
