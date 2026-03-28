@@ -127,45 +127,41 @@ def enviar_purchase_capi(uid: int, valor: float):
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     args = context.args
-    payload = args[0] if args else ""
+    payload = " ".join(args) if args else ""
 
     logger.info(f"[START] UID: {uid} | Payload: {payload}")
 
     if payload.startswith("track_"):
         temp_key = payload
-        tracking_str = None
-        
-        # Tenta ler 3 vezes com um pequeno intervalo para garantir que o Flask escreveu
-        for _ in range(3):
+        tracking_str = r.get(f"tracking:{temp_key}")
+
+        if not tracking_str:
+            await asyncio.sleep(1)
             tracking_str = r.get(f"tracking:{temp_key}")
-            if tracking_str:
-                break
-            await asyncio.sleep(1.5) # Espera 1.5 segundo entre tentativas
 
         if tracking_str:
             try:
-                # Transforma a string de volta em dicionário com segurança
-                import ast
                 tracking_data = ast.literal_eval(tracking_str)
 
                 if "fbp" in tracking_data:
                     r.set(f"fbp:{uid}", tracking_data["fbp"], ex=604800)
-                
-                if "fbc" in tracking_data:
-                    # Salva o FBC formatado corretamente
-                    r.set(f"fbclid:{uid}", tracking_data["fbc"], ex=604800)
-                    logger.info(f"✅ FBC/FBP vinculados com sucesso ao UID {uid}")
+                    logger.info(f"✅ FBP salvo para UID {uid}")
 
-                # Opcional: r.delete(f"tracking:{temp_key}") # Comente se quiser testar várias vezes
+                if "fbc" in tracking_data:
+                    r.set(f"fbclid:{uid}", tracking_data["fbc"], ex=604800)
+                    logger.info(f"✅ FBC salvo para UID {uid}")
+
+                r.delete(f"tracking:{temp_key}")
                 enviar_lead_capi(uid, "start_com_tracking")
-                return # Finaliza aqui com sucesso
 
             except Exception as e:
                 logger.error(f"❌ Erro ao processar tracking data: {e}")
-        
-        logger.warning(f"⚠️ Tracking não encontrado no Redis para a chave: {temp_key}")
-        enviar_lead_capi(uid, "start_chave_nao_encontrada")
+                enviar_lead_capi(uid, "start_erro_tracking")
+        else:
+            logger.warning(f"[START] Chave temporária não encontrada: {temp_key}")
+            enviar_lead_capi(uid, "start_sem_chave")
     else:
+        logger.info("[START] Nenhum parâmetro de tracking recebido")
         enviar_lead_capi(uid, "start_direto")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
