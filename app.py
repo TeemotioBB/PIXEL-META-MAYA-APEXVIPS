@@ -141,17 +141,14 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"[START] UID: {uid} | Payload: {payload}")
 
+    async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    args = context.args
+    payload = " ".join(args) if args else ""
+
+    logger.info(f"[START] UID: {uid} | Payload: {payload}")
+
     if payload.startswith("track_"):
-        temp_key = payload
-
-        # tenta buscar no Redis
-        tracking_str = r.get(f"tracking:{temp_key}")
-
-        if not tracking_str:
-            await asyncio.sleep(1)
-            tracking_str = r.get(f"tracking:{temp_key}")
-
-        if payload.startswith("track_"):
         temp_key = payload
 
         # tenta buscar no Redis
