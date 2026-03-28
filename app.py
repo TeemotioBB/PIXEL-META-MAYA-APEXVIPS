@@ -45,24 +45,22 @@ def vincular_tracking(uid_real, uid_track):
         tracking_data = ast.literal_eval(tracking_str)
         if "fbp" in tracking_data:
             r.set(f"fbp:{uid_real}", tracking_data["fbp"], ex=604800)
-        # ✅ FIX: chave padronizada para fbc:{uid}
         if "fbc" in tracking_data:
             r.set(f"fbc:{uid_real}", tracking_data["fbc"], ex=604800)
         if "client_ip" in tracking_data:
             r.set(f"ip:{uid_real}", tracking_data["client_ip"], ex=604800)
         if "client_user_agent" in tracking_data:
             r.set(f"ua:{uid_real}", tracking_data["client_user_agent"], ex=604800)
-        r.delete(f"tracking:{uid_track}")
+        r.expire(f"tracking:{uid_track}", 300)
         return True
     return False
 
 # ====================== USER DATA ======================
 def montar_user_data(uid):
-    """Busca dados no Redis e monta o dicionário user_data para a Meta com IP e UA reais"""
+    """Busca dados no Redis e monta o dicionário user_data para a Meta"""
     user_data = {"external_id": [hash_data(str(uid))]}
 
     fbp     = r.get(f"fbp:{uid}")
-    # ✅ FIX: era fbclid:{uid} — padronizado para fbc:{uid} em todo o projeto
     fbc_raw = r.get(f"fbc:{uid}")
     ip      = r.get(f"ip:{uid}")
     ua      = r.get(f"ua:{uid}")
@@ -151,19 +149,17 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"🚀 [START] User: {uid} | Payload: '{payload}'")
 
-
     if payload.startswith("track_"):
         temp_key = f"tracking:{payload}"
         tracking_str = None
 
+        # Tenta buscar 10 vezes (20 segundos no total)
         for tentativa in range(10):
             tracking_str = r.get(temp_key)
             if tracking_str:
                 break
             logger.info(f"⏳ Tentativa {tentativa+1}/10: Aguardando tracking de {payload}...")
             await asyncio.sleep(2.0)
-        
-        # ... resto continua igual
 
         if tracking_str:
             try:
@@ -171,7 +167,6 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                 if "fbp" in tracking_data:
                     r.set(f"fbp:{uid}", tracking_data["fbp"], ex=604800)
-                # ✅ FIX: era fbclid:{uid} — padronizado para fbc:{uid}
                 if "fbc" in tracking_data:
                     r.set(f"fbc:{uid}", tracking_data["fbc"], ex=604800)
                 if "client_ip" in tracking_data:
@@ -179,6 +174,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if "client_user_agent" in tracking_data:
                     r.set(f"ua:{uid}", tracking_data["client_user_agent"], ex=604800)
 
+                # Não deleta — expira sozinho em 5 min
                 r.expire(temp_key, 300)
                 logger.info(f"✅ [SUCESSO] Dados vinculados para UID {uid}")
                 enviar_lead_capi(uid, "start_com_tracking")
@@ -187,7 +183,9 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"❌ Erro ao processar tracking data: {e}")
                 enviar_lead_capi(uid, "start_erro_tracking")
         else:
-            logger.warning(f"⚠️ [AVISO] Payload {payload} não chegou no Redis após 20 segundos.")
+            # ✅ RETRO-VÍNCULO: guarda uid real para quando o tracking chegar depois
+            logger.warning(f"⚠️ [AVISO] Payload {payload} não chegou em 20s — salvando pending_uid para retro-vínculo")
+            r.set(f"pending_uid:{payload}", str(uid), ex=300)
             enviar_lead_capi(uid, "start_sem_chave")
     else:
         logger.info(f"ℹ️ [START] Direto sem tracking para UID {uid}")
@@ -241,21 +239,26 @@ def apex_tracking():
     if not uid:
         return jsonify({"error": "uid não fornecido"}), 400
 
+    # ✅ Bloqueia bots de crawler/preview
+    user_agent = request.headers.get('User-Agent', '')
+    bots = ['vercel-screenshot', 'HeadlessChrome', 'Googlebot', 'bingbot', 'facebookexternalhit']
+    if any(bot.lower() in user_agent.lower() for bot in bots):
+        logger.info(f"🤖 [BOT BLOQUEADO] uid={uid} | UA: {user_agent[:60]}")
+        return jsonify({"status": "ignored", "reason": "bot"}), 200
+
     fbclid = request.args.get('fbclid')
-    fbp = request.args.get('fbp')
-    fbc = request.args.get('fbc')
-    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr)
+    fbp    = request.args.get('fbp')
+    fbc    = request.args.get('fbc')
+    client_ip         = request.headers.get('X-Forwarded-For', request.remote_addr)
     client_user_agent = request.headers.get('User-Agent')
 
     tracking_data = {}
-
     if fbp:
         tracking_data["fbp"] = fbp
     if fbc:
         tracking_data["fbc"] = fbc
     elif fbclid:
         tracking_data["fbc"] = f"fb.1.{int(time.time() * 1000)}.{fbclid}"
-
     if client_ip:
         tracking_data["client_ip"] = client_ip.split(',')[0].strip()
     if client_user_agent:
@@ -263,6 +266,21 @@ def apex_tracking():
 
     r.set(f"tracking:{uid}", str(tracking_data), ex=86400)
     logger.info(f"💾 [TRACKING RECEBIDO E SALVO] uid={uid} | FBP: {bool(fbp)}")
+
+    # ✅ RETRO-VÍNCULO: se o /start já desistiu de esperar, vincula agora e reenvia Lead
+    uid_real = r.get(f"pending_uid:{uid}")
+    if uid_real:
+        logger.info(f"🔁 [RETRO-VÍNCULO] Tracking chegou tarde — vinculando para UID {uid_real}")
+        if fbp:
+            r.set(f"fbp:{uid_real}", fbp, ex=604800)
+        if tracking_data.get("fbc"):
+            r.set(f"fbc:{uid_real}", tracking_data["fbc"], ex=604800)
+        if tracking_data.get("client_ip"):
+            r.set(f"ip:{uid_real}", tracking_data["client_ip"], ex=604800)
+        if client_user_agent:
+            r.set(f"ua:{uid_real}", client_user_agent, ex=604800)
+        enviar_lead_capi(int(uid_real), "retro_tracking")
+        r.delete(f"pending_uid:{uid}")
 
     return jsonify({"status": "ok", "uid": uid}), 200
 
@@ -281,8 +299,8 @@ def webhook():
 @app.route('/apex-webhook', methods=['POST'])
 def apex_webhook():
     data = request.get_json() or {}
-    evento = data.get("event")
-    uid = data.get("customer", {}).get("chat_id")
+    evento  = data.get("event")
+    uid     = data.get("customer", {}).get("chat_id")
     val_raw = data.get("transaction", {}).get("plan_value", 0)
     uid_track = data.get("tracking_uid")
 
