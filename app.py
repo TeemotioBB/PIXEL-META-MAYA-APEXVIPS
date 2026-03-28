@@ -37,27 +37,8 @@ except Exception as e:
     logger.error(f"❌ Erro Redis: {e}")
     raise
 
-# ====================== VINCULAR TRACKING (apex-webhook) ======================
-def vincular_tracking(uid_real, uid_track):
-    """Vincula dados de tracking temporários ao UID real do Telegram"""
-    tracking_str = r.get(f"tracking:{uid_track}")
-    if tracking_str:
-        tracking_data = ast.literal_eval(tracking_str)
-        if "fbp" in tracking_data:
-            r.set(f"fbp:{uid_real}", tracking_data["fbp"], ex=604800)
-        if "fbc" in tracking_data:
-            r.set(f"fbc:{uid_real}", tracking_data["fbc"], ex=604800)
-        if "client_ip" in tracking_data:
-            r.set(f"ip:{uid_real}", tracking_data["client_ip"], ex=604800)
-        if "client_user_agent" in tracking_data:
-            r.set(f"ua:{uid_real}", tracking_data["client_user_agent"], ex=604800)
-        r.expire(f"tracking:{uid_track}", 300)
-        return True
-    return False
-
 # ====================== USER DATA ======================
 def montar_user_data(uid):
-    """Busca dados no Redis e monta o dicionário user_data para a Meta"""
     user_data = {"external_id": [hash_data(str(uid))]}
 
     fbp     = r.get(f"fbp:{uid}")
@@ -85,7 +66,7 @@ def enviar_lead_capi(uid: int, trigger: str):
         "data": [{
             "event_name": "Lead",
             "event_time": int(time.time()),
-            "event_id": f"lead_{uid}_{date.today()}",
+            "event_id": f"lead_{uid}_{date.today()}",  # mesmo event_id no mesmo dia = Meta deduplica
             "action_source": "chat",
             "user_data": user_data,
             "custom_data": {"trigger": trigger}
@@ -141,24 +122,27 @@ def enviar_purchase_capi(uid: int, valor: float):
     except Exception as e:
         logger.error(f"❌ Erro Purchase: {e}")
 
-# ====================== APEX JOINED COM RETRY ======================
-def apex_joined_com_retry(uid: int):
+# ====================== FALLBACK: envia Lead se /start nunca vier ======================
+def apex_joined_fallback(uid: int):
     """
-    Aguarda até 30s para o /start vincular os dados de tracking.
-    A ApexVIPs dispara user_joined ANTES do Telegram processar o /start,
-    então esperamos o fbp:{uid} aparecer no Redis antes de enviar o Lead.
-    """
-    for tentativa in range(15):
-        fbp = r.get(f"fbp:{uid}")
-        if fbp:
-            logger.info(f"✅ [APEX JOINED] Dados vinculados para UID {uid} na tentativa {tentativa+1} — enviando Lead")
-            break
-        logger.info(f"⏳ [APEX JOINED] Aguardando /start vincular dados para UID {uid} — tentativa {tentativa+1}/15")
-        time.sleep(2)
-    else:
-        logger.warning(f"⚠️ [APEX JOINED] Dados NÃO chegaram em 30s para UID {uid} — enviando Lead sem tracking")
+    NOVA LÓGICA — sem corrida de 30s.
 
-    enviar_lead_capi(uid, "apex_joined")
+    O /start agora é DONO do envio do Lead. Este fallback só dispara
+    se o /start não aparecer em 90 segundos (ex: usuário entrou
+    direto no bot sem usar o link de convite).
+
+    A flag `pending_join:{uid}` é deletada pelo /start assim que ele
+    envia o Lead. Se ainda existir depois de 90s, o /start não veio
+    e enviamos sem tracking.
+    """
+    time.sleep(90)
+
+    if r.get(f"pending_join:{uid}"):
+        logger.warning(f"⚠️ [FALLBACK] /start não chegou em 90s para UID {uid} — enviando Lead sem tracking")
+        r.delete(f"pending_join:{uid}")
+        enviar_lead_capi(uid, "apex_joined_sem_start")
+    else:
+        logger.info(f"✅ [FALLBACK] UID {uid} já tratado pelo /start — fallback ignorado")
 
 # ====================== HANDLERS ======================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -193,22 +177,32 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if "client_user_agent" in tracking_data:
                     r.set(f"ua:{uid}", tracking_data["client_user_agent"], ex=604800)
 
-                # Não deleta — expira sozinho em 5 min
                 r.expire(temp_key, 300)
-                logger.info(f"✅ [SUCESSO] Dados vinculados para UID {uid}")
-                enviar_lead_capi(uid, "start_com_tracking")
+                logger.info(f"✅ [SUCESSO] Dados vinculados para UID {uid} via payload {payload}")
 
             except Exception as e:
                 logger.error(f"❌ Erro ao processar tracking data: {e}")
-                enviar_lead_capi(uid, "start_erro_tracking")
+
         else:
             # RETRO-VÍNCULO: guarda uid real para quando o tracking chegar depois
             logger.warning(f"⚠️ [AVISO] Payload {payload} não chegou em 20s — salvando pending_uid para retro-vínculo")
             r.set(f"pending_uid:{payload}", str(uid), ex=300)
-            enviar_lead_capi(uid, "start_sem_chave")
-    else:
-        logger.info(f"ℹ️ [START] Direto sem tracking para UID {uid}")
-        enviar_lead_capi(uid, "start_direto")
+
+    # ── ENVIO DO LEAD ──────────────────────────────────────────────────────────
+    # O /start é SEMPRE responsável por enviar o Lead (com ou sem tracking).
+    # Ele também cancela o fallback do apex_joined deletando a flag pending_join.
+    # O event_id idêntico no mesmo dia garante deduplicação na Meta caso o
+    # fallback já tenha disparado em paralelo.
+
+    fbp_exists = bool(r.get(f"fbp:{uid}"))
+    trigger = "start_com_tracking" if fbp_exists else "start_sem_tracking"
+
+    enviar_lead_capi(uid, trigger)
+
+    # Cancela o fallback do apex_joined (ele checa essa flag antes de enviar)
+    r.delete(f"pending_join:{uid}")
+    logger.info(f"🗑️ [START] pending_join:{uid} deletado — fallback cancelado")
+
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -258,7 +252,6 @@ def apex_tracking():
     if not uid:
         return jsonify({"error": "uid não fornecido"}), 400
 
-    # Bloqueia bots de crawler/preview
     user_agent = request.headers.get('User-Agent', '')
     bots = ['vercel-screenshot', 'HeadlessChrome', 'Googlebot', 'bingbot', 'facebookexternalhit']
     if any(bot.lower() in user_agent.lower() for bot in bots):
@@ -329,8 +322,16 @@ def apex_webhook():
         return "ok", 200
 
     if evento == "user_joined":
-        # ✅ Roda em thread separada — aguarda até 30s pelo /start vincular os dados
-        threading.Thread(target=apex_joined_com_retry, args=(uid,), daemon=True).start()
+        # ─────────────────────────────────────────────────────────────────────
+        # NOVA LÓGICA:
+        #   1. Salva flag pending_join:{uid}
+        #   2. Inicia thread de fallback (90s)
+        #   3. O /start vai deletar a flag e enviar o Lead com tracking
+        #   4. Se o /start não vier em 90s, o fallback envia sem tracking
+        # ─────────────────────────────────────────────────────────────────────
+        r.set(f"pending_join:{uid}", "1", ex=300)  # 5 min de segurança
+        logger.info(f"🏁 [APEX JOINED] Flag pending_join:{uid} criada — aguardando /start por 90s")
+        threading.Thread(target=apex_joined_fallback, args=(uid,), daemon=True).start()
 
     elif evento == "payment_created":
         logger.info(f"[PAYMENT CREATED] UID={uid} → enviando InitiateCheckout")
