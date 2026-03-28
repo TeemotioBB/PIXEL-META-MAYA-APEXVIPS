@@ -8,10 +8,31 @@ import threading
 import requests
 import redis
 import ast
+
+r = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+
+def vincular_tracking(uid_real, uid_track):
+    tracking_str = r.get(f"tracking:{uid_track}")
+    if tracking_str:
+        tracking_data = ast.literal_eval(tracking_str)
+        if "fbp" in tracking_data:
+            r.set(f"fbp:{uid_real}", tracking_data["fbp"], ex=604800)
+        if "fbc" in tracking_data:
+            r.set(f"fbc:{uid_real}", tracking_data["fbc"], ex=604800)
+        if "client_ip" in tracking_data:
+            r.set(f"ip:{uid_real}", tracking_data["client_ip"], ex=604800)
+        if "client_user_agent" in tracking_data:
+            r.set(f"ua:{uid_real}", tracking_data["client_user_agent"], ex=604800)
+        r.delete(f"tracking:{uid_track}")
+        return True
+    return False
+
 from datetime import date
 from flask import Flask, request, jsonify
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes
+
+app = Flask(__name__)
 
 # ====================== LOGGING ======================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -257,20 +278,27 @@ def webhook():
         logger.error(f"❌ Erro Webhook: {e}")
         return "error", 500
 
+# ====================== CORREÇÃO AQUI ======================
 @app.route('/apex-webhook', methods=['POST'])
 def apex_webhook():
     data = request.get_json() or {}
     evento = data.get("event")
     uid = data.get("customer", {}).get("chat_id")
     val_raw = data.get("transaction", {}).get("plan_value", 0)
+    uid_track = data.get("tracking_uid")  # 🔹 precisa vir do front ou mapeamento
+
     if not uid: 
         return "ok", 200
-    if evento == "user_joined": 
+
+    if evento == "user_joined":
+        if uid_track:
+            vincular_tracking(uid, uid_track)  # 🔹 vincula dados do tracking
         enviar_lead_capi(uid, "apex_joined")
-    elif evento == "payment_created": 
+    elif evento == "payment_created":
         enviar_initiatecheckout_capi(uid)
-    elif evento == "payment_approved": 
+    elif evento == "payment_approved":
         enviar_purchase_capi(uid, float(val_raw)/100)
+
     return "ok", 200
 
 @app.route("/set-webhook", methods=["GET"])
