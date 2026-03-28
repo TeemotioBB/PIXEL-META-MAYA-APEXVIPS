@@ -304,17 +304,32 @@ def apex_webhook():
     val_raw = data.get("transaction", {}).get("plan_value", 0)
     uid_track = data.get("tracking_uid")
 
+    # LOG: mostra todo o payload recebido e os campos extraídos
+    logger.info(f"[APEX WEBHOOK] Payload completo: {data}")
+    logger.info(f"[APEX WEBHOOK] Evento={evento} | chat_id={uid} | tracking_uid={uid_track}")
+
     if not uid:
         return "ok", 200
 
     if evento == "user_joined":
         if uid_track:
+            # Verifica se a chave existe no Redis antes de tentar vincular
+            chave_tracking = f"tracking:{uid_track}"
+            existe = r.exists(chave_tracking)
+            logger.info(f"[VÍNCULO] Tentando vincular {chave_tracking} → existe? {existe}")
             vincular_tracking(uid, uid_track)
+        else:
+            logger.warning("[VÍNCULO] tracking_uid NÃO FOI ENVIADO no webhook!")
         enviar_lead_capi(uid, "apex_joined")
+
     elif evento == "payment_created":
+        logger.info(f"[PAYMENT CREATED] UID={uid} → enviando InitiateCheckout")
         enviar_initiatecheckout_capi(uid)
+
     elif evento == "payment_approved":
-        enviar_purchase_capi(uid, float(val_raw) / 100)
+        valor = float(val_raw) / 100
+        logger.info(f"[PAYMENT APPROVED] UID={uid} | valor R${valor:.2f} → enviando Purchase")
+        enviar_purchase_capi(uid, valor)
 
     return "ok", 200
 
