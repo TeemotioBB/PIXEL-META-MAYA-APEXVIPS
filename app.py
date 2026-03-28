@@ -143,33 +143,39 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if payload.startswith("track_"):
         temp_key = payload
-        # Tenta buscar, se não achar, espera 1 segundo e tenta de novo
+
+        # tenta buscar no Redis
         tracking_str = r.get(f"tracking:{temp_key}")
+
         if not tracking_str:
             await asyncio.sleep(1)
             tracking_str = r.get(f"tracking:{temp_key}")
-        
+
         if tracking_str:
             try:
                 tracking_data = ast.literal_eval(tracking_str)
 
                 if "fbp" in tracking_data:
-                    r.set(f"fbp:{uid}", tracking_data["fbp"], ex=604800) # Agora dura 7 dias
+                    r.set(f"fbp:{uid}", tracking_data["fbp"], ex=604800)
                     logger.info(f"✅ FBP salvo para UID {uid}")
 
                 if "fbc" in tracking_data:
-                    r.set(f"fbclid:{uid}", tracking_data["fbc"], ex=604800) # Agora dura 7 dias
+                    r.set(f"fbclid:{uid}", tracking_data["fbc"], ex=604800)
                     logger.info(f"✅ FBC salvo para UID {uid}")
 
                 r.delete(f"tracking:{temp_key}")
+
             except Exception as e:
                 logger.error(f"❌ Erro ao processar tracking data: {e}")
+
         else:
             logger.warning(f"[START] Chave temporária não encontrada: {temp_key}")
+
     else:
         logger.info("[START] Nenhum parâmetro de tracking recebido (acesso direto)")
 
     await asyncio.sleep(0.3)
+
     enviar_lead_capi(uid, "start")
 
 # ====================== BUTTON E MESSAGE HANDLERS ======================
@@ -213,9 +219,9 @@ def apex_tracking():
     fbclid = request.args.get('fbclid')
     fbp = request.args.get('fbp')
 
-    # 🔥 LOG PARA DEBUG: Rastreia a chegada dos parâmetros
+    # LOG de entrada
     logger.info(f"[TRACKING RECEBIDO] fbclid={fbclid} | fbp={fbp}")
-    
+
     temp_key = f"track_{int(time.time())}"
     tracking_data = {}
 
@@ -229,12 +235,15 @@ def apex_tracking():
         tracking_data["fbc"] = fbc_formatted
         logger.info(f"[TRACKING] FBC gerado → {fbc_formatted[:100]}...")
 
+    # salva no Redis
     r.set(f"tracking:{temp_key}", str(tracking_data), ex=86400)
 
-    bot_url = f"https://t.me/Mayaoficial_bot?start={temp_key}"
-    
+    # 🔥 REDIRECIONA PARA LANDING COM UID
+    landing_url = f"https://landinpixels.vercel.app/?uid={temp_key}"
+
     logger.info(f"[TRACKING] Redirecionando UID temporário → {temp_key}")
-    return redirect(bot_url)
+
+    return redirect(landing_url)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
