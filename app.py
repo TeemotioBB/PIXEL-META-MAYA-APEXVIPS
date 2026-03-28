@@ -239,11 +239,11 @@ def apex_tracking():
     r.set(f"tracking:{temp_key}", str(tracking_data), ex=86400)
 
     # 🔥 REDIRECIONA PARA LANDING COM UID
-    landing_url = f"https://landinpixels.vercel.app/?uid={temp_key}"
+    bot_url = f"https://t.me/Mayaoficial_bot?start={temp_key}"
 
     logger.info(f"[TRACKING] Redirecionando UID temporário → {temp_key}")
 
-    return redirect(landing_url)
+    return redirect(bot_url)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
