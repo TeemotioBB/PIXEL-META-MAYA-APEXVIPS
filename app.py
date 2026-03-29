@@ -340,6 +340,9 @@ def apex_tracking():
 def webhook():
     try:
         data = request.json
+        # 👇 ADICIONE ESTA LINHA:
+        logger.info(f"📩 [WEBHOOK RECEBIDO DO TELEGRAM] {data}") 
+        
         if data:
             update = Update.de_json(data, application.bot)
             asyncio.run_coroutine_threadsafe(application.process_update(update), bot_loop)
