@@ -197,16 +197,15 @@ def apex_joined_fallback(uid: int):
 # ====================== HANDLERS ======================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-
-    # 🚫 BLOQUEIO DE START DUPLICADO (principal correção)
-    start_lock = f"start_lock:{uid}"
-    if r.exists(start_lock):
-        logger.info(f"⏭️ [START BLOQUEADO] User {uid} já iniciou recentemente")
-        return
-    r.set(start_lock, "1", ex=60)  # trava por 60s
-
     args = context.args
     payload = args[0] if args else ""
+
+    # 🚫 BLOQUEIO INTELIGENTE
+    start_key = f"start_unique:{uid}:{payload}"
+    if r.exists(start_key):
+        logger.info(f"⏭️ [START DUPLICADO] UID {uid} | Payload {payload}")
+        return
+    r.set(start_key, "1", ex=86400)
 
     logger.info(f"🚀 [START] User: {uid} | Payload: '{payload}'")
 
@@ -227,11 +226,9 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"⚠️ Tracking {temp_key} não chegou em 20s — salvando pending_uid")
             r.set(f"pending_uid:{temp_key}", str(uid), ex=300)
 
-        # Salva bridge: uid_temp → uid_real (permite retro-vínculo no apex-tracking)
         r.set(f"bridge:{temp_key}", str(uid), ex=3600)
         logger.info(f"🌉 [BRIDGE] bridge:{temp_key} → {uid} salvo")
 
-    # /start cancela o fallback e envia o Lead (dono do envio)
     r.delete(f"pending_join:{uid}")
     enviar_lead_capi(uid, "start")
 
