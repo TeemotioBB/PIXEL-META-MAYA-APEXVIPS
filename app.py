@@ -45,15 +45,29 @@ def montar_user_data(uid):
     fbc_raw = r.get(f"fbc:{uid}")
     ip      = r.get(f"ip:{uid}")
     ua      = r.get(f"ua:{uid}")
+    phone   = r.get(f"phone:{uid}")
+    name    = r.get(f"name:{uid}")
+    tax_id  = r.get(f"taxid:{uid}")
 
-    logger.info(f"[montar_user_data] UID {uid} → FBP: {bool(fbp)} | FBC: {bool(fbc_raw)} | IP: {bool(ip)} | UA: {bool(ua)}")
+    logger.info(
+        f"[montar_user_data] UID {uid} → "
+        f"FBP: {bool(fbp)} | FBC: {bool(fbc_raw)} | "
+        f"IP: {bool(ip)} | UA: {bool(ua)} | "
+        f"Phone: {bool(phone)} | Name: {bool(name)} | CPF: {bool(tax_id)}"
+    )
 
-    if fbp:
-        user_data["fbp"] = fbp
-    if fbc_raw:
-        user_data["fbc"] = fbc_raw
-    if ip:
-        user_data["client_ip_address"] = ip
+    if fbp:   user_data["fbp"] = fbp
+    if fbc_raw: user_data["fbc"] = fbc_raw
+    if ip:    user_data["client_ip_address"] = ip
+    if phone: user_data["ph"] = [hash_data(phone.replace("+", "").replace(" ", ""))]
+    if name:
+        partes = name.strip().split(" ", 1)
+        user_data["fn"] = [hash_data(partes[0])]
+        if len(partes) > 1:
+            user_data["ln"] = [hash_data(partes[1])]
+    if tax_id:
+        cpf_limpo = tax_id.replace(".", "").replace("-", "").replace(" ", "")
+        user_data["external_id"].append(hash_data(cpf_limpo))
 
     user_data["client_user_agent"] = ua if ua else "TelegramBot/1.0"
 
@@ -378,15 +392,36 @@ def apex_webhook():
     uid     = data.get("customer", {}).get("chat_id")
     val_raw = data.get("transaction", {}).get("plan_value", 0)
 
+    # ✅ Captura dados ricos que a Apex já manda
+    phone     = data.get("customer", {}).get("phone", "")
+    full_name = data.get("customer", {}).get("full_name", "")
+    tax_id    = data.get("customer", {}).get("tax_id", "")
+    origin_ip = data.get("origin", {}).get("ip", "")
+    origin_ua = data.get("origin", {}).get("user_agent", "")
+
     logger.info(f"[APEX WEBHOOK] Payload completo: {data}")
     logger.info(f"[APEX WEBHOOK] Evento={evento} | chat_id={uid}")
 
     if not uid:
         return "ok", 200
 
+    # ✅ Salva os dados ricos no Redis para enriquecer o CAPI
+    if evento in ("payment_created", "payment_approved"):
+        if phone:
+            r.set(f"phone:{uid}", phone, ex=604800)
+        if full_name:
+            r.set(f"name:{uid}", full_name, ex=604800)
+        if tax_id:
+            r.set(f"taxid:{uid}", tax_id, ex=604800)
+        if origin_ip:
+            r.set(f"ip:{uid}", origin_ip, ex=604800)
+        if origin_ua:
+            r.set(f"ua:{uid}", origin_ua, ex=604800)
+        logger.info(f"💎 [APEX] Dados ricos salvos | phone={bool(phone)} | name={bool(full_name)} | tax_id={bool(tax_id)}")
+
     if evento == "user_joined":
         r.set(f"pending_join:{uid}", "1", ex=300)
-        logger.info(f"🏁 [APEX JOINED] pending_join:{uid} criada — /start tem 90s")
+        logger.info(f"🏁 [APEX JOINED] pending_join:{uid} criada")
         threading.Thread(target=apex_joined_fallback, args=(uid,), daemon=True).start()
 
     elif evento == "payment_created":
