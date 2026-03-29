@@ -96,13 +96,10 @@ def enviar_lead_capi(uid: int, trigger: str):
         "access_token": ACCESS_TOKEN
     }
     try:
-        response = requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
-        if response.status_code != 200:
-            logger.error(f"❌ Erro Meta Lead: {response.status_code} - {response.text}")
-        else:
-            novo_lock = "com_tracking" if fbp_exists else "sem_tracking"
-            r.set(lock_key, novo_lock, ex=86400)
-            logger.info(f"🟢 [CAPI] Lead ENVIADO | UID: {uid} | Trigger: {trigger} | Lock: {novo_lock}")
+        requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
+        novo_lock = "com_tracking" if fbp_exists else "sem_tracking"
+        r.set(lock_key, novo_lock, ex=86400)
+        logger.info(f"🟢 [CAPI] Lead ENVIADO | UID: {uid} | Trigger: {trigger} | Lock: {novo_lock}")
     except Exception as e:
         logger.error(f"❌ Erro Lead: {e}")
 
@@ -200,57 +197,36 @@ def apex_joined_fallback(uid: int):
 # ====================== HANDLERS ======================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    update_id = update.update_id
     args = context.args
     payload = args[0] if args else ""
 
-    logger.info(f"🚀 START HANDLER | update_id={update_id} | uid={uid} | payload='{payload}'")
+    logger.info(f"🚀 [START] User: {uid} | Payload: '{payload}'")
 
-    # BLOQUEIO DE UPDATE DUPLICADO (atomic)
-    update_key = f"update_processed:{update_id}"
-    if not r.setnx(update_key, "1"):
-        logger.info(f"⏭️ UPDATE DUPLICADO IGNORADO: update_id={update_id}")
-        return
-    r.expire(update_key, 60)
-
-    # RATE LIMIT INTELIGENTE: permite payload diferente mesmo em curto intervalo
-    # Evita apenas o mesmo payload repetido em menos de 5 segundos
-    last_payload_key = f"last_start_payload:{uid}"
-    last_payload = r.get(last_payload_key)
-    if last_payload == payload and payload != "":
-        logger.info(f"⏱️ RATE LIMIT: mesmo payload '{payload}' repetido para uid {uid} em menos de 5s")
-        return
-    # Atualiza o último payload com expiração curta (5s)
-    r.set(last_payload_key, payload, ex=5)
-
-    # Processa payload tracking
     if payload.startswith("track_"):
         temp_key = payload
-        logger.info(f"📡 Tracking detectado: {temp_key}")
+
         tracking_str = None
-        # Aguarda até 30 segundos (15 tentativas * 2s)
-        for tentativa in range(15):
+        for tentativa in range(10):
             tracking_str = r.get(f"tracking:{temp_key}")
             if tracking_str:
-                logger.info(f"✅ Tracking encontrado na tentativa {tentativa+1}")
                 break
-            logger.info(f"⏳ Tentativa {tentativa+1}/15: aguardando tracking...")
+            logger.info(f"⏳ Tentativa {tentativa+1}/10: Aguardando tracking de {temp_key}...")
             await asyncio.sleep(2.0)
 
         if tracking_str:
             vincular_tracking_por_uid_temp(uid, temp_key)
         else:
-            logger.warning(f"⚠️ Tracking NÃO encontrado para {temp_key} após 30s, salvando pending")
+            logger.warning(f"⚠️ Tracking {temp_key} não chegou em 20s — salvando pending_uid")
             r.set(f"pending_uid:{temp_key}", str(uid), ex=300)
 
+        # Salva bridge: uid_temp → uid_real (permite retro-vínculo no apex-tracking)
         r.set(f"bridge:{temp_key}", str(uid), ex=3600)
-        logger.info(f"🌉 bridge salvo: {temp_key} → {uid}")
-    else:
-        logger.info(f"ℹ️ Payload vazio ou não tracking: '{payload}'")
+        logger.info(f"🌉 [BRIDGE] bridge:{temp_key} → {uid} salvo")
 
-    # Limpa flag de pending_join e envia lead
+    # /start cancela o fallback e envia o Lead (dono do envio)
     r.delete(f"pending_join:{uid}")
     enviar_lead_capi(uid, "start")
+
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -324,22 +300,21 @@ def apex_tracking():
     if client_user_agent:
         tracking_data["client_user_agent"] = client_user_agent
 
-    # Salva tracking
     r.set(f"tracking:{uid}", str(tracking_data), ex=86400)
-    logger.info(f"💾 [TRACKING SALVO] uid={uid} | FBP: {bool(fbp)} | dados: {tracking_data}")
+    logger.info(f"💾 [TRACKING RECEBIDO E SALVO] uid={uid} | FBP: {bool(fbp)}")
 
-    # RETRO-VÍNCULO via pending_uid (quando /start desistiu de esperar)
+    # RETRO-VÍNCULO via pending_uid (o /start desistiu de esperar)
     uid_real = r.get(f"pending_uid:{uid}")
     if uid_real:
-        logger.info(f"🔁 RETRO-VÍNCULO pending_uid: {uid} → {uid_real}")
+        logger.info(f"🔁 [RETRO-VÍNCULO pending_uid] uid_temp={uid} → uid_real={uid_real}")
         vincular_tracking_por_uid_temp(int(uid_real), uid)
         enviar_lead_capi(int(uid_real), "retro_tracking")
         r.delete(f"pending_uid:{uid}")
 
-    # RETRO-VÍNCULO via bridge (start já chegou, mas tracking veio depois)
+    # RETRO-VÍNCULO via bridge (o /start já chegou, mas apex_joined veio depois)
     uid_real_bridge = r.get(f"bridge:{uid}")
     if uid_real_bridge and not uid_real:
-        logger.info(f"🌉 RETRO-VÍNCULO bridge: {uid} → {uid_real_bridge}")
+        logger.info(f"🌉 [RETRO-VÍNCULO bridge] uid_temp={uid} → uid_real={uid_real_bridge}")
         vincular_tracking_por_uid_temp(int(uid_real_bridge), uid)
         enviar_lead_capi(int(uid_real_bridge), "retro_bridge")
 
@@ -349,17 +324,12 @@ def apex_tracking():
 def webhook():
     try:
         data = request.json
-        if not data:
-            return "ok", 200
-        # Log do update recebido
-        update_id = data.get('update_id')
-        message_text = data.get('message', {}).get('text') if data.get('message') else None
-        logger.info(f"📨 Webhook recebido: update_id={update_id} | text={message_text}")
-        update = Update.de_json(data, application.bot)
-        asyncio.run_coroutine_threadsafe(application.process_update(update), bot_loop)
+        if data:
+            update = Update.de_json(data, application.bot)
+            asyncio.run_coroutine_threadsafe(application.process_update(update), bot_loop)
         return "ok", 200
     except Exception as e:
-        logger.error(f"❌ Erro Webhook: {e}", exc_info=True)
+        logger.error(f"❌ Erro Webhook: {e}")
         return "error", 500
 
 @app.route('/apex-webhook', methods=['POST'])
