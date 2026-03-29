@@ -170,19 +170,21 @@ def vincular_tracking_por_uid_temp(uid_real: int, uid_temp: str) -> bool:
 
 # ====================== APEX JOINED FALLBACK ======================
 def apex_joined_fallback(uid: int):
-    time.sleep(20)  # reduzido de 90s para 20s
+    time.sleep(20)
     if not r.get(f"pending_join:{uid}"):
         return
-
     r.delete(f"pending_join:{uid}")
-
     matched = False
     try:
         keys = r.keys("tracking:track_*")
         for key in keys:
             uid_temp = key.replace("tracking:", "")
             if r.get(f"bridge:{uid_temp}"):
-                continue  # já vinculado
+                continue
+            ttl = r.ttl(key)
+            if ttl < (86400 - 60):
+                logger.info(f"⏭️ [FALLBACK] {uid_temp} ignorado — tracking antigo (TTL: {ttl})")
+                continue
             vincular_tracking_por_uid_temp(uid, uid_temp)
             r.set(f"bridge:{uid_temp}", str(uid), ex=3600)
             logger.info(f"🔁 [FALLBACK MATCH] {uid_temp} → {uid}")
@@ -190,7 +192,6 @@ def apex_joined_fallback(uid: int):
             break
     except Exception as e:
         logger.error(f"❌ Erro no fallback match: {e}")
-
     enviar_lead_capi(uid, "fallback_com_match" if matched else "apex_joined_sem_start")
 
 # ====================== HANDLERS ======================
