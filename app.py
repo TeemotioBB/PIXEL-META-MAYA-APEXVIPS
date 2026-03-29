@@ -318,20 +318,34 @@ def apex_tracking():
     r.set(f"tracking:{uid}", str(tracking_data), ex=86400)
     logger.info(f"💾 [TRACKING RECEBIDO E SALVO] uid={uid} | FBP: {bool(fbp)}")
 
-    # RETRO-VÍNCULO via pending_uid (o /start desistiu de esperar)
+    # ====================== 🔥 CORREÇÃO AQUI ======================
+
+    # RETRO-VÍNCULO via pending_uid
     uid_real = r.get(f"pending_uid:{uid}")
     if uid_real:
-        logger.info(f"🔁 [RETRO-VÍNCULO pending_uid] uid_temp={uid} → uid_real={uid_real}")
-        vincular_tracking_por_uid_temp(int(uid_real), uid)
-        enviar_lead_capi(int(uid_real), "retro_tracking")
+        uid_real = int(uid_real)
+
+        logger.info(f"🔁 [RETRO-VÍNCULO pending_uid] {uid} → {uid_real}")
+        vincular_tracking_por_uid_temp(uid_real, uid)
+
+        # 🔥 REMOVE LOCK PRA PERMITIR REENVIO
+        r.delete(f"lead_sent:{uid_real}:{date.today()}")
+
+        enviar_lead_capi(uid_real, "retro_tracking")
         r.delete(f"pending_uid:{uid}")
 
-    # RETRO-VÍNCULO via bridge (o /start já chegou, mas apex_joined veio depois)
+    # RETRO-VÍNCULO via bridge
     uid_real_bridge = r.get(f"bridge:{uid}")
     if uid_real_bridge and not uid_real:
-        logger.info(f"🌉 [RETRO-VÍNCULO bridge] uid_temp={uid} → uid_real={uid_real_bridge}")
-        vincular_tracking_por_uid_temp(int(uid_real_bridge), uid)
-        enviar_lead_capi(int(uid_real_bridge), "retro_bridge")
+        uid_real_bridge = int(uid_real_bridge)
+
+        logger.info(f"🌉 [RETRO-VÍNCULO bridge] {uid} → {uid_real_bridge}")
+        vincular_tracking_por_uid_temp(uid_real_bridge, uid)
+
+        # 🔥 REMOVE LOCK PRA PERMITIR REENVIO
+        r.delete(f"lead_sent:{uid_real_bridge}:{date.today()}")
+
+        enviar_lead_capi(uid_real_bridge, "retro_bridge")
 
     return jsonify({"status": "ok", "uid": uid}), 200
 
