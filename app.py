@@ -197,17 +197,6 @@ def apex_joined_fallback(uid: int):
 # ====================== HANDLERS ======================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    
-    # --- TRAVA ATÔMICA (ANTI-DUPLICAÇÃO) ---
-    # setnx (set if not exists) garante que apenas UMA requisição crie a chave
-    lock_key = f"lock_start_atomic:{uid}"
-    foi_criado = r.set(lock_key, "1", ex=60, nx=True) # Tenta criar com expiração de 60s
-    
-    if not foi_criado:
-        logger.warning(f"🛑 [TRAVA ATÔMICA] Tentativa de /start duplicado bloqueada para UID: {uid}")
-        return
-    # ---------------------------------------
-
     args = context.args
     payload = args[0] if args else ""
 
@@ -215,9 +204,8 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if payload.startswith("track_"):
         temp_key = payload
+
         tracking_str = None
-        
-        # Loop de espera pelo tracking (máximo 20s)
         for tentativa in range(10):
             tracking_str = r.get(f"tracking:{temp_key}")
             if tracking_str:
@@ -231,15 +219,13 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"⚠️ Tracking {temp_key} não chegou em 20s — salvando pending_uid")
             r.set(f"pending_uid:{temp_key}", str(uid), ex=300)
 
+        # Salva bridge: uid_temp → uid_real (permite retro-vínculo no apex-tracking)
         r.set(f"bridge:{temp_key}", str(uid), ex=3600)
         logger.info(f"🌉 [BRIDGE] bridge:{temp_key} → {uid} salvo")
 
-    # Limpa pendências e envia o Lead
+    # /start cancela o fallback e envia o Lead (dono do envio)
     r.delete(f"pending_join:{uid}")
     enviar_lead_capi(uid, "start")
-    
-    # AQUI VOCÊ ENVIA AS MENSAGENS DO SEU FUNIL
-    # await update.message.reply_text("Bem-vindo ao bot!...")
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
