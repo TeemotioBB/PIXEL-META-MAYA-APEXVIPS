@@ -197,16 +197,6 @@ def apex_joined_fallback(uid: int):
 # ====================== HANDLERS ======================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    
-    # --- TRAVA ANTI-DUPLICIDADE ---
-    # Criamos uma chave que expira em 5 segundos. 
-    # .set(nx=True) só retorna True se a chave NÃO existia.
-    lock_key = f"processing_start:{uid}"
-    if not r.set(lock_key, "1", ex=5, nx=True):
-        logger.info(f"🚫 [DUPLICATA] Ignorando start repetido de {uid}")
-        return
-    # ------------------------------
-
     args = context.args
     payload = args[0] if args else ""
 
@@ -214,30 +204,28 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if payload.startswith("track_"):
         temp_key = payload
+
         tracking_str = None
-        
-        # Diminuí um pouco as tentativas ou o tempo para não segurar o lock demais
-        for tentativa in range(5): 
+        for tentativa in range(10):
             tracking_str = r.get(f"tracking:{temp_key}")
             if tracking_str:
                 break
-            logger.info(f"⏳ Tentativa {tentativa+1}/5: Aguardando tracking...")
-            await asyncio.sleep(1.5)
+            logger.info(f"⏳ Tentativa {tentativa+1}/10: Aguardando tracking de {temp_key}...")
+            await asyncio.sleep(2.0)
 
         if tracking_str:
             vincular_tracking_por_uid_temp(uid, temp_key)
         else:
-            logger.warning(f"⚠️ Tracking {temp_key} não chegou — salvando pending_uid")
+            logger.warning(f"⚠️ Tracking {temp_key} não chegou em 20s — salvando pending_uid")
             r.set(f"pending_uid:{temp_key}", str(uid), ex=300)
 
+        # Salva bridge: uid_temp → uid_real (permite retro-vínculo no apex-tracking)
         r.set(f"bridge:{temp_key}", str(uid), ex=3600)
+        logger.info(f"🌉 [BRIDGE] bridge:{temp_key} → {uid} salvo")
 
-    # /start cancela o fallback e envia o Lead
+    # /start cancela o fallback e envia o Lead (dono do envio)
     r.delete(f"pending_join:{uid}")
     enviar_lead_capi(uid, "start")
-    
-    # Opcional: Responder ao usuário para ele saber que funcionou
-    await update.message.reply_text("Seja bem-vindo! Seu acesso está sendo processado.")
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
