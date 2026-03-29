@@ -200,22 +200,6 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     payload = args[0] if args else ""
 
-    # 🔒 LOCK ANTI DUPLICAÇÃO (principal correção)
-    lock_key = f"start_lock:{uid}"
-    if r.exists(lock_key):
-        logger.info(f"⏭️ [START BLOQUEADO] UID: {uid}")
-        return
-    r.set(lock_key, "1", ex=10)
-
-    # 🔒 BLOQUEIO DE PAYLOAD REPETIDO
-    last_start = r.get(f"last_start:{uid}")
-    if last_start == payload:
-        logger.info(f"⏭️ [PAYLOAD DUPLICADO] UID: {uid}")
-        return
-    r.set(f"last_start:{uid}", payload, ex=5)
-
-    # 🧠 DEBUG AVANÇADO
-    logger.info(f"UPDATE_ID: {update.update_id}")
     logger.info(f"🚀 [START] User: {uid} | Payload: '{payload}'")
 
     if payload.startswith("track_"):
@@ -235,11 +219,11 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"⚠️ Tracking {temp_key} não chegou em 20s — salvando pending_uid")
             r.set(f"pending_uid:{temp_key}", str(uid), ex=300)
 
-        # bridge continua igual
+        # Salva bridge: uid_temp → uid_real (permite retro-vínculo no apex-tracking)
         r.set(f"bridge:{temp_key}", str(uid), ex=3600)
         logger.info(f"🌉 [BRIDGE] bridge:{temp_key} → {uid} salvo")
 
-    # mantém sua lógica original intacta
+    # /start cancela o fallback e envia o Lead (dono do envio)
     r.delete(f"pending_join:{uid}")
     enviar_lead_capi(uid, "start")
 
