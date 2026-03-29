@@ -199,14 +199,11 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     args = context.args
     payload = args[0] if args else ""
-
-    # Trava anti-duplicata
+    # Trava anti-duplicata atômica
     start_key = f"start_processing:{uid}"
-    if r.get(start_key):
+    if not r.set(start_key, "1", ex=10, nx=True):
         logger.info(f"⏭️ [START] Duplicata ignorada — UID: {uid}")
         return
-    r.set(start_key, "1", ex=10)
-
     logger.info(f"🚀 [START] User: {uid} | Payload: '{payload}'")
     if payload.startswith("track_"):
         temp_key = payload
