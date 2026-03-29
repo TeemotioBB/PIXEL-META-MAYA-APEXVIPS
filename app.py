@@ -197,6 +197,14 @@ def apex_joined_fallback(uid: int):
 # ====================== HANDLERS ======================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+
+    # 🚫 BLOQUEIO DE START DUPLICADO (principal correção)
+    start_lock = f"start_lock:{uid}"
+    if r.exists(start_lock):
+        logger.info(f"⏭️ [START BLOQUEADO] User {uid} já iniciou recentemente")
+        return
+    r.set(start_lock, "1", ex=60)  # trava por 60s
+
     args = context.args
     payload = args[0] if args else ""
 
