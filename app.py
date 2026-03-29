@@ -384,15 +384,17 @@ def webhook():
     except Exception as e:
         logger.error(f"❌ Erro Webhook: {e}")
         return "error", 500
-
+        
 @app.route('/apex-webhook', methods=['POST'])
 def apex_webhook():
+    # ✅ Loga tudo que chegar
+    logger.info(f"📩 [APEX WEBHOOK RAW] Headers: {dict(request.headers)}")
+    logger.info(f"📩 [APEX WEBHOOK RAW] Body: {request.get_data(as_text=True)[:500]}")
+
     data    = request.get_json() or {}
     evento  = data.get("event")
     uid     = data.get("customer", {}).get("chat_id")
     val_raw = data.get("transaction", {}).get("plan_value", 0)
-
-    # ✅ Captura dados ricos que a Apex já manda
     phone     = data.get("customer", {}).get("phone", "")
     full_name = data.get("customer", {}).get("full_name", "")
     tax_id    = data.get("customer", {}).get("tax_id", "")
@@ -405,7 +407,6 @@ def apex_webhook():
     if not uid:
         return "ok", 200
 
-    # ✅ Salva os dados ricos no Redis para enriquecer o CAPI
     if evento in ("payment_created", "payment_approved"):
         if phone:
             r.set(f"phone:{uid}", phone, ex=604800)
