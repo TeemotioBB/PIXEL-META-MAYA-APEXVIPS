@@ -135,26 +135,27 @@ def apex_tracking():
 
     return "ok", 200
 
-@app.route('/apex-webhook', methods=['POST'])
-def apex_webhook():
-    """Recebe eventos de pagamento (Apex/Outros)"""
-    data = request.get_json() or {}
-    evento = data.get("event")
-    chat_id = data.get("customer", {}).get("chat_id")
-    
-    if not chat_id: return "ok", 200
+@app.route('/set-webhook', methods=['GET'])
+def set_webhook():
+    url = f"https://{request.host}/webhook"
+    try:
+        async def s():
+            await application.bot.set_webhook(url)
+        asyncio.run_coroutine_threadsafe(s(), asyncio.get_event_loop())
+        return f"✅ Webhook do Telegram configurado para: {url}", 200
+    except Exception as e:
+        return str(e), 500
 
-    # 1. Checkout (Quando gera o PIX)
-    if evento == "payment_created":
-        enviar_para_meta("InitiateCheckout", chat_id, f"init_{chat_id}_{int(time.time())}")
-
-    # 2. Compra (Quando o dinheiro entra)
-    elif evento == "payment_approved":
-        valor_raw = data.get("transaction", {}).get("plan_value", 0)
-        valor = float(valor_raw) / 100
-        enviar_para_meta("Purchase", chat_id, f"pur_{chat_id}_{int(time.time())}", {"value": valor, "currency": "BRL"})
-
-    return "ok", 200
+@app.route('/webhook', methods=['POST'])
+def telegram_webhook():
+    """Rota específica para as mensagens do Bot do Telegram"""
+    try:
+        data = request.json
+        update = Update.de_json(data, application.bot)
+        asyncio.run_coroutine_threadsafe(application.process_update(update), asyncio.get_event_loop())
+        return "ok", 200
+    except Exception as e:
+        return "err", 500
 
 @app.route("/", methods=["GET"])
 def home():
