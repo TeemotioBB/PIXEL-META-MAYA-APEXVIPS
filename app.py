@@ -197,6 +197,17 @@ def apex_joined_fallback(uid: int):
 # ====================== HANDLERS ======================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
+    
+    # --- INÍCIO DA TRAVA DE IDEMPOTÊNCIA ---
+    lock_key = f"lock_start:{uid}"
+    if r.exists(lock_key):
+        logger.warning(f"🛑 [TRAVA] Comando /start duplicado interceptado. Ignorando UID: {uid}")
+        return
+    
+    # Bloqueia novas execuções por 30 segundos
+    r.set(lock_key, "1", ex=30)
+    # --- FIM DA TRAVA ---
+
     args = context.args
     payload = args[0] if args else ""
 
