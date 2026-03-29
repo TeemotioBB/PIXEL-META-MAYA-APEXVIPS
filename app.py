@@ -170,13 +170,28 @@ def vincular_tracking_por_uid_temp(uid_real: int, uid_temp: str) -> bool:
 
 # ====================== APEX JOINED FALLBACK ======================
 def apex_joined_fallback(uid: int):
-    time.sleep(90)
-    if r.get(f"pending_join:{uid}"):
-        logger.warning(f"⚠️ [FALLBACK] /start não chegou em 90s para UID {uid} — enviando Lead sem tracking")
-        r.delete(f"pending_join:{uid}")
-        enviar_lead_capi(uid, "apex_joined_sem_start")
-    else:
-        logger.info(f"✅ [FALLBACK] UID {uid} já tratado pelo /start — fallback ignorado")
+    time.sleep(20)  # reduzido de 90s para 20s
+    if not r.get(f"pending_join:{uid}"):
+        return
+
+    r.delete(f"pending_join:{uid}")
+
+    matched = False
+    try:
+        keys = r.keys("tracking:track_*")
+        for key in keys:
+            uid_temp = key.replace("tracking:", "")
+            if r.get(f"bridge:{uid_temp}"):
+                continue  # já vinculado
+            vincular_tracking_por_uid_temp(uid, uid_temp)
+            r.set(f"bridge:{uid_temp}", str(uid), ex=3600)
+            logger.info(f"🔁 [FALLBACK MATCH] {uid_temp} → {uid}")
+            matched = True
+            break
+    except Exception as e:
+        logger.error(f"❌ Erro no fallback match: {e}")
+
+    enviar_lead_capi(uid, "fallback_com_match" if matched else "apex_joined_sem_start")
 
 # ====================== HANDLERS ======================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
