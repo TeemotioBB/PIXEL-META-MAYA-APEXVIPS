@@ -202,9 +202,10 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.info(f"🚀 [START] User: {uid} | Payload: '{payload}'")
 
-    if payload.startswith("track_"):
+    # Processar tracking se payload for track_xxx
+    tracking_processed = False
+    if payload and payload.startswith("track_"):
         temp_key = payload
-
         tracking_str = None
         for tentativa in range(10):
             tracking_str = r.get(f"tracking:{temp_key}")
@@ -219,11 +220,19 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"⚠️ Tracking {temp_key} não chegou em 20s — salvando pending_uid")
             r.set(f"pending_uid:{temp_key}", str(uid), ex=300)
 
-        # Salva bridge: uid_temp → uid_real (permite retro-vínculo no apex-tracking)
         r.set(f"bridge:{temp_key}", str(uid), ex=3600)
         logger.info(f"🌉 [BRIDGE] bridge:{temp_key} → {uid} salvo")
+        tracking_processed = True
 
-    # /start cancela o fallback e envia o Lead (dono do envio)
+    # ⭐ NOVO: Se não é tracking e o lead já foi enviado hoje, ignora o /start
+    if not tracking_processed:
+        lead_sent_key = f"lead_sent:{uid}:{date.today()}"
+        if r.exists(lead_sent_key):
+            logger.info(f"⏭️ [START] Lead já enviado hoje para {uid}. Ignorando novo /start para evitar repetição do funil.")
+            r.delete(f"pending_join:{uid}")   # limpa fallback pendente
+            return
+
+    # Cancelar fallback pendente (se existir)
     r.delete(f"pending_join:{uid}")
     enviar_lead_capi(uid, "start")
 
