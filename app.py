@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import json
 import logging
 import hashlib
 import time
@@ -7,7 +8,6 @@ import asyncio
 import threading
 import requests
 import redis
-import ast
 
 from datetime import date
 from flask import Flask, request, jsonify
@@ -66,22 +66,29 @@ def enviar_lead_capi(uid: int, trigger: str):
     Se já foi enviado hoje COM tracking, não envia de novo.
     Se foi enviado SEM tracking mas agora tem FBP, reenvia enriquecido.
     """
-    lock_key = f"lead_sent:{uid}:{date.today()}"
-    lock_val = r.get(lock_key)
-
+    lock_key   = f"lead_sent:{uid}:{date.today()}"
+    lock_val   = r.get(lock_key)
     fbp_exists = bool(r.get(f"fbp:{uid}"))
+    fbc_exists = bool(r.get(f"fbc:{uid}"))
+    ip_exists  = bool(r.get(f"ip:{uid}"))
+
+    # ✅ FIX #1 — Log de diagnóstico ANTES de qualquer return
+    logger.info(
+        f"📊 [CAPI ENTRADA] uid={uid} | trigger={trigger} | "
+        f"lock={lock_val} | fbp={fbp_exists} | fbc={fbc_exists} | ip={ip_exists}"
+    )
 
     if lock_val == "com_tracking":
-        logger.info(f"⏭️ [CAPI] Lead já enviado COM tracking hoje — UID: {uid} ignorado")
+        logger.info(f"⏭️ [CAPI SKIP] Lead já enviado COM tracking hoje — UID: {uid}")
         return
 
     if lock_val == "sem_tracking" and not fbp_exists:
-        logger.info(f"⏭️ [CAPI] Lead já enviado SEM tracking e tracking ainda não chegou — UID: {uid} ignorado")
+        logger.info(f"⏭️ [CAPI SKIP] Lead já enviado SEM tracking e FBP ainda não chegou — UID: {uid}")
         return
 
     if lock_val == "sem_tracking" and fbp_exists:
         trigger = f"{trigger}_enriquecido"
-        logger.info(f"🔄 [CAPI] Reenviando Lead enriquecido para UID: {uid}")
+        logger.info(f"🔄 [CAPI ENRICH] Reenviando Lead enriquecido para UID: {uid}")
 
     user_data = montar_user_data(uid)
     payload = {
@@ -96,10 +103,17 @@ def enviar_lead_capi(uid: int, trigger: str):
         "access_token": ACCESS_TOKEN
     }
     try:
-        requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
+        resp = requests.post(
+            f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events",
+            json=payload,
+            timeout=10
+        )
         novo_lock = "com_tracking" if fbp_exists else "sem_tracking"
         r.set(lock_key, novo_lock, ex=86400)
-        logger.info(f"🟢 [CAPI] Lead ENVIADO | UID: {uid} | Trigger: {trigger} | Lock: {novo_lock}")
+        logger.info(
+            f"🟢 [CAPI] Lead ENVIADO | UID: {uid} | Trigger: {trigger} | "
+            f"Lock: {novo_lock} | HTTP: {resp.status_code} | Resp: {resp.text[:200]}"
+        )
     except Exception as e:
         logger.error(f"❌ Erro Lead: {e}")
 
@@ -122,8 +136,12 @@ def enviar_initiatecheckout_capi(uid: int):
         "access_token": ACCESS_TOKEN
     }
     try:
-        requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
-        logger.info(f"🔥 [CAPI] Checkout ENVIADO | UID: {uid}")
+        resp = requests.post(
+            f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events",
+            json=payload,
+            timeout=10
+        )
+        logger.info(f"🔥 [CAPI] Checkout ENVIADO | UID: {uid} | HTTP: {resp.status_code}")
     except Exception as e:
         logger.error(f"❌ Erro Checkout: {e}")
 
@@ -141,8 +159,12 @@ def enviar_purchase_capi(uid: int, valor: float):
         "access_token": ACCESS_TOKEN
     }
     try:
-        requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
-        logger.info(f"💰 [CAPI] Purchase ENVIADO | UID: {uid} | R$ {valor:.2f}")
+        resp = requests.post(
+            f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events",
+            json=payload,
+            timeout=10
+        )
+        logger.info(f"💰 [CAPI] Purchase ENVIADO | UID: {uid} | R$ {valor:.2f} | HTTP: {resp.status_code}")
     except Exception as e:
         logger.error(f"❌ Erro Purchase: {e}")
 
@@ -150,9 +172,11 @@ def enviar_purchase_capi(uid: int, valor: float):
 def vincular_tracking_por_uid_temp(uid_real: int, uid_temp: str) -> bool:
     tracking_str = r.get(f"tracking:{uid_temp}")
     if not tracking_str:
+        logger.warning(f"⚠️ [VÍNCULO] tracking:{uid_temp} não encontrado no Redis")
         return False
     try:
-        tracking_data = ast.literal_eval(tracking_str)
+        # ✅ FIX #2 — json.loads ao invés de ast.literal_eval (muito mais seguro)
+        tracking_data = json.loads(tracking_str)
         if "fbp" in tracking_data:
             r.set(f"fbp:{uid_real}", tracking_data["fbp"], ex=604800)
         if "fbc" in tracking_data:
@@ -162,28 +186,37 @@ def vincular_tracking_por_uid_temp(uid_real: int, uid_temp: str) -> bool:
         if "client_user_agent" in tracking_data:
             r.set(f"ua:{uid_real}", tracking_data["client_user_agent"], ex=604800)
         r.expire(f"tracking:{uid_temp}", 300)
-        logger.info(f"✅ [VÍNCULO] {uid_temp} → UID {uid_real} | FBP: {bool(tracking_data.get('fbp'))}")
+        logger.info(
+            f"✅ [VÍNCULO] {uid_temp} → UID {uid_real} | "
+            f"FBP: {bool(tracking_data.get('fbp'))} | "
+            f"FBC: {bool(tracking_data.get('fbc'))} | "
+            f"IP: {bool(tracking_data.get('client_ip'))}"
+        )
         return True
     except Exception as e:
-        logger.error(f"❌ Erro ao vincular tracking: {e}")
+        logger.error(f"❌ Erro ao vincular tracking (json.loads falhou): {e} | raw: {tracking_str[:200]}")
         return False
 
 # ====================== APEX JOINED FALLBACK ======================
 def apex_joined_fallback(uid: int):
     time.sleep(20)
     if not r.get(f"pending_join:{uid}"):
+        logger.info(f"⏭️ [FALLBACK] pending_join:{uid} já foi removido pelo /start — ignorando")
         return
     r.delete(f"pending_join:{uid}")
     matched = False
     try:
-        keys = r.keys("tracking:track_*")
+        # ✅ FIX #3 — scan_iter ao invés de r.keys() (não bloqueia o Redis)
+        keys = list(r.scan_iter("tracking:track_*", count=100))
+        logger.info(f"🔍 [FALLBACK] Varrendo {len(keys)} tracking(s) para UID: {uid}")
         for key in keys:
             uid_temp = key.replace("tracking:", "")
             if r.get(f"bridge:{uid_temp}"):
                 continue
             ttl = r.ttl(key)
-            if ttl < (86400 - 60):
-                logger.info(f"⏭️ [FALLBACK] {uid_temp} ignorado — tracking antigo (TTL: {ttl})")
+            # ✅ FIX #4 — janela ampliada de 60s para 300s (5 minutos)
+            if ttl < (86400 - 300):
+                logger.info(f"⏭️ [FALLBACK] {uid_temp} ignorado — tracking antigo (TTL restante: {ttl}s)")
                 continue
             vincular_tracking_por_uid_temp(uid, uid_temp)
             r.set(f"bridge:{uid_temp}", str(uid), ex=3600)
@@ -209,21 +242,22 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for tentativa in range(10):
             tracking_str = r.get(f"tracking:{temp_key}")
             if tracking_str:
+                logger.info(f"✅ [START] Tracking encontrado na tentativa {tentativa+1} para {temp_key}")
                 break
-            logger.info(f"⏳ Tentativa {tentativa+1}/10: Aguardando tracking de {temp_key}...")
+            logger.info(f"⏳ [START] Tentativa {tentativa+1}/10: Aguardando tracking de {temp_key}...")
             await asyncio.sleep(2.0)
 
         if tracking_str:
             vincular_tracking_por_uid_temp(uid, temp_key)
         else:
-            logger.warning(f"⚠️ Tracking {temp_key} não chegou em 20s — salvando pending_uid")
+            logger.warning(f"⚠️ [START] Tracking {temp_key} não chegou em 20s — salvando pending_uid")
             r.set(f"pending_uid:{temp_key}", str(uid), ex=300)
 
         # Salva bridge: uid_temp → uid_real (permite retro-vínculo no apex-tracking)
         r.set(f"bridge:{temp_key}", str(uid), ex=3600)
         logger.info(f"🌉 [BRIDGE] bridge:{temp_key} → {uid} salvo")
 
-    # /start cancela o fallback e envia o Lead (dono do envio)
+    # /start cancela o fallback e envia o Lead
     r.delete(f"pending_join:{uid}")
     enviar_lead_capi(uid, "start")
 
@@ -300,8 +334,13 @@ def apex_tracking():
     if client_user_agent:
         tracking_data["client_user_agent"] = client_user_agent
 
-    r.set(f"tracking:{uid}", str(tracking_data), ex=86400)
-    logger.info(f"💾 [TRACKING RECEBIDO E SALVO] uid={uid} | FBP: {bool(fbp)}")
+    # ✅ FIX #2 — json.dumps ao invés de str() para salvar no Redis
+    r.set(f"tracking:{uid}", json.dumps(tracking_data), ex=86400)
+    logger.info(
+        f"💾 [TRACKING SALVO] uid={uid} | "
+        f"FBP: {bool(fbp)} | FBC: {bool(fbc or fbclid)} | "
+        f"IP: {bool(client_ip)} | UA: {bool(client_user_agent)}"
+    )
 
     # RETRO-VÍNCULO via pending_uid (o /start desistiu de esperar)
     uid_real = r.get(f"pending_uid:{uid}")
