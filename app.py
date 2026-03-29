@@ -200,11 +200,16 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     payload = args[0] if args else ""
 
-    logger.info(f"🚀 [START] User: {uid} | Payload: '{payload}'")
+    # Trava anti-duplicata
+    start_key = f"start_processing:{uid}"
+    if r.get(start_key):
+        logger.info(f"⏭️ [START] Duplicata ignorada — UID: {uid}")
+        return
+    r.set(start_key, "1", ex=10)
 
+    logger.info(f"🚀 [START] User: {uid} | Payload: '{payload}'")
     if payload.startswith("track_"):
         temp_key = payload
-
         tracking_str = None
         for tentativa in range(10):
             tracking_str = r.get(f"tracking:{temp_key}")
@@ -212,18 +217,13 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
             logger.info(f"⏳ Tentativa {tentativa+1}/10: Aguardando tracking de {temp_key}...")
             await asyncio.sleep(2.0)
-
         if tracking_str:
             vincular_tracking_por_uid_temp(uid, temp_key)
         else:
             logger.warning(f"⚠️ Tracking {temp_key} não chegou em 20s — salvando pending_uid")
             r.set(f"pending_uid:{temp_key}", str(uid), ex=300)
-
-        # Salva bridge: uid_temp → uid_real (permite retro-vínculo no apex-tracking)
         r.set(f"bridge:{temp_key}", str(uid), ex=3600)
         logger.info(f"🌉 [BRIDGE] bridge:{temp_key} → {uid} salvo")
-
-    # /start cancela o fallback e envia o Lead (dono do envio)
     r.delete(f"pending_join:{uid}")
     enviar_lead_capi(uid, "start")
 
