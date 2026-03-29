@@ -199,12 +199,13 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     args = context.args
     payload = args[0] if args else ""
-
+    # Trava anti-duplicata atômica
+    start_key = f"start_processing:{uid}"
+    if not r.set(start_key, "1", ex=10, nx=True):
+        logger.info(f"⏭️ [START] Duplicata ignorada — UID: {uid}")
+        return
     logger.info(f"🚀 [START] User: {uid} | Payload: '{payload}'")
-
-    # Processar tracking se payload for track_xxx
-    tracking_processed = False
-    if payload and payload.startswith("track_"):
+    if payload.startswith("track_"):
         temp_key = payload
         tracking_str = None
         for tentativa in range(10):
@@ -213,26 +214,13 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
             logger.info(f"⏳ Tentativa {tentativa+1}/10: Aguardando tracking de {temp_key}...")
             await asyncio.sleep(2.0)
-
         if tracking_str:
             vincular_tracking_por_uid_temp(uid, temp_key)
         else:
             logger.warning(f"⚠️ Tracking {temp_key} não chegou em 20s — salvando pending_uid")
             r.set(f"pending_uid:{temp_key}", str(uid), ex=300)
-
         r.set(f"bridge:{temp_key}", str(uid), ex=3600)
         logger.info(f"🌉 [BRIDGE] bridge:{temp_key} → {uid} salvo")
-        tracking_processed = True
-
-    # ⭐ NOVO: Se não é tracking e o lead já foi enviado hoje, ignora o /start
-    if not tracking_processed:
-        lead_sent_key = f"lead_sent:{uid}:{date.today()}"
-        if r.exists(lead_sent_key):
-            logger.info(f"⏭️ [START] Lead já enviado hoje para {uid}. Ignorando novo /start para evitar repetição do funil.")
-            r.delete(f"pending_join:{uid}")   # limpa fallback pendente
-            return
-
-    # Cancelar fallback pendente (se existir)
     r.delete(f"pending_join:{uid}")
     enviar_lead_capi(uid, "start")
 
