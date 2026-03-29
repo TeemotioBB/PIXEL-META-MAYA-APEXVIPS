@@ -199,19 +199,25 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     update_id = update.update_id
 
-    # 🚫 BLOQUEIO REAL (UPDATE DUPLICADO DO TELEGRAM)
+    # 🚫 BLOQUEIO REAL (UPDATE DUPLICADO DO TELEGRAM) - AGORA ATÔMICO COM SETNX
     update_key = f"update_processed:{update_id}"
-    if r.exists(update_key):
-        logger.info(f"⏭️ [UPDATE DUPLICADO IGNORADO] {update_id}")
+    if not r.setnx(update_key, "1"):
+        logger.info(f"⏭️ [UPDATE DUPLICADO IGNORADO] update_id={update_id}")
         return
-    r.set(update_key, "1", ex=60)
+    r.expire(update_key, 60)
+
+    # 🚫 RATE LIMIT POR USUÁRIO (evita múltiplos starts em menos de 5 segundos)
+    rate_key = f"rate_start:{uid}"
+    if r.exists(rate_key):
+        logger.info(f"⏱️ [RATE LIMIT] Usuário {uid} tentou start muito rápido — ignorado")
+        return
+    r.set(rate_key, "1", ex=5)
 
     args = context.args
     payload = args[0] if args else ""
 
     # 🧠 DEBUG
-    logger.info(f"UPDATE_ID: {update_id}")
-    logger.info(f"🚀 [START] User: {uid} | Payload: '{payload}'")
+    logger.info(f"UPDATE_ID: {update_id} | USER: {uid} | Payload: '{payload}'")
 
     if payload.startswith("track_"):
         temp_key = payload
@@ -236,7 +242,6 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # mantém sua lógica original intacta
     r.delete(f"pending_join:{uid}")
     enviar_lead_capi(uid, "start")
-
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
