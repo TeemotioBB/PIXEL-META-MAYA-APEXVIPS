@@ -7,12 +7,15 @@ import asyncio
 import threading
 import requests
 import redis
-import ast
+import json
 
 from datetime import date
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, CallbackQueryHandler, filters, ContextTypes
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # ====================== LOGGING ======================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -22,8 +25,19 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN_APEX")
 REDIS_URL = os.getenv("REDIS_URL")
 WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL")
-PIXEL_ID = "735253462874774"
+PIXEL_ID = os.getenv("PIXEL_ID", "735253462874774")
 ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
+
+# Validação de env vars essenciais
+missing_envs = [k for k,v in {
+    "TELEGRAM_TOKEN_APEX": TELEGRAM_TOKEN,
+    "REDIS_URL": REDIS_URL,
+    "META_ACCESS_TOKEN": ACCESS_TOKEN,
+    "WEBHOOK_BASE_URL": WEBHOOK_BASE_URL
+}.items() if not v]
+if missing_envs:
+    logger.error(f"Variáveis de ambiente faltando: {missing_envs}")
+    raise SystemExit(1)
 
 def hash_data(value: str) -> str:
     return hashlib.sha256(value.strip().lower().encode("utf-8")).hexdigest()
@@ -34,30 +48,80 @@ try:
     r.ping()
     logger.info("✅ Redis conectado!")
 except Exception as e:
-    logger.error(f"❌ Erro Redis: {e}")
+    logger.exception(f"❌ Erro Redis: {e}")
     raise
+
+# ====================== FLASK / TELEGRAM / CORS ======================
+app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+# ====================== HTTP SESSION COM RETRY ======================
+session = requests.Session()
+retries = Retry(total=3, backoff_factor=0.6, status_forcelist=[429,500,502,503,504], allowed_methods=["POST","GET"])
+session.mount("https://", HTTPAdapter(max_retries=retries))
 
 # ====================== USER DATA ======================
 def montar_user_data(uid):
-    user_data = {"external_id": [hash_data(str(uid))]}
+    """
+    Monta user_data para CAPI.
+    Prefere email/phone hashed se disponíveis; senão usa external_id hashed do chat_id como fallback.
+    Inclui fbp/fbc/ip/ua apenas se existirem.
+    """
+    user_data = {}
 
-    fbp     = r.get(f"fbp:{uid}")
-    fbc_raw = r.get(f"fbc:{uid}")
-    ip      = r.get(f"ip:{uid}")
-    ua      = r.get(f"ua:{uid}")
+    # Preferir email/phone se existirem (armazenados previamente no Redis)
+    email = r.get(f"email:{uid}")
+    phone = r.get(f"phone:{uid}")
+    if email:
+        user_data["em"] = hash_data(email)
+    if phone:
+        user_data["ph"] = hash_data(phone)
 
-    logger.info(f"[montar_user_data] UID {uid} → FBP: {bool(fbp)} | FBC: {bool(fbc_raw)} | IP: {bool(ip)} | UA: {bool(ua)}")
+    # Fallback para external_id (documentar que é fallback e pode reduzir match)
+    if not any(k in user_data for k in ("em", "ph")):
+        user_data["external_id"] = [hash_data(str(uid))]
+
+    # Campos de tracking
+    fbp = r.get(f"fbp:{uid}")
+    fbc = r.get(f"fbc:{uid}")
+    ip  = r.get(f"ip:{uid}")
+    ua  = r.get(f"ua:{uid}")
 
     if fbp:
         user_data["fbp"] = fbp
-    if fbc_raw:
-        user_data["fbc"] = fbc_raw
+    if fbc:
+        user_data["fbc"] = fbc
     if ip:
         user_data["client_ip_address"] = ip
+    if ua:
+        user_data["client_user_agent"] = ua
 
-    user_data["client_user_agent"] = ua if ua else "TelegramBot/1.0"
-
+    logger.info(f"[montar_user_data] UID {uid} → keys: {list(user_data.keys())}")
     return user_data
+
+# ====================== POST PARA META (com log e fila de retry) ======================
+def _post_to_meta(payload):
+    url = f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events"
+    try:
+        resp = session.post(url, json=payload, timeout=10)
+        logger.info(f"[Meta] status={resp.status_code} response={resp.text}")
+        if resp.status_code >= 400:
+            # gravar para retry assíncrono
+            try:
+                r.rpush("pending_capi_events", json.dumps({"payload": payload, "status": resp.status_code, "response": resp.text}))
+            except Exception:
+                logger.exception("Erro ao gravar pending_capi_events")
+            return False
+        return True
+    except Exception as e:
+        logger.exception("Erro ao postar no Meta")
+        try:
+            r.rpush("pending_capi_events", json.dumps({"payload": payload, "error": str(e)}))
+        except Exception:
+            logger.exception("Erro ao gravar pending_capi_events")
+        return False
 
 # ====================== CAPI FUNCTIONS ======================
 def enviar_lead_capi(uid: int, trigger: str):
@@ -95,17 +159,18 @@ def enviar_lead_capi(uid: int, trigger: str):
         }],
         "access_token": ACCESS_TOKEN
     }
-    try:
-        requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
-        novo_lock = "com_tracking" if fbp_exists else "sem_tracking"
+    ok = _post_to_meta(payload)
+    novo_lock = "com_tracking" if fbp_exists else "sem_tracking"
+    if ok:
         r.set(lock_key, novo_lock, ex=86400)
         logger.info(f"🟢 [CAPI] Lead ENVIADO | UID: {uid} | Trigger: {trigger} | Lock: {novo_lock}")
-    except Exception as e:
-        logger.error(f"❌ Erro Lead: {e}")
+    else:
+        logger.warning(f"❌ [CAPI] Falha ao enviar Lead | UID: {uid} | gravado para retry")
 
 def enviar_initiatecheckout_capi(uid: int):
     redis_key = f"checkout_sent:{uid}"
     if r.exists(redis_key):
+        logger.info(f"⏭️ [CAPI] InitiateCheckout já enviado recentemente para UID: {uid}")
         return
     r.set(redis_key, "1", ex=3600)
 
@@ -121,11 +186,11 @@ def enviar_initiatecheckout_capi(uid: int):
         }],
         "access_token": ACCESS_TOKEN
     }
-    try:
-        requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
+    ok = _post_to_meta(payload)
+    if ok:
         logger.info(f"🔥 [CAPI] Checkout ENVIADO | UID: {uid}")
-    except Exception as e:
-        logger.error(f"❌ Erro Checkout: {e}")
+    else:
+        logger.warning(f"❌ [CAPI] Falha ao enviar InitiateCheckout | UID: {uid}")
 
 def enviar_purchase_capi(uid: int, valor: float):
     user_data = montar_user_data(uid)
@@ -140,11 +205,11 @@ def enviar_purchase_capi(uid: int, valor: float):
         }],
         "access_token": ACCESS_TOKEN
     }
-    try:
-        requests.post(f"https://graph.facebook.com/v22.0/{PIXEL_ID}/events", json=payload, timeout=10)
+    ok = _post_to_meta(payload)
+    if ok:
         logger.info(f"💰 [CAPI] Purchase ENVIADO | UID: {uid} | R$ {valor:.2f}")
-    except Exception as e:
-        logger.error(f"❌ Erro Purchase: {e}")
+    else:
+        logger.warning(f"❌ [CAPI] Falha ao enviar Purchase | UID: {uid} | R$ {valor:.2f}")
 
 # ====================== VINCULAR TRACKING ======================
 def vincular_tracking_por_uid_temp(uid_real: int, uid_temp: str) -> bool:
@@ -152,7 +217,7 @@ def vincular_tracking_por_uid_temp(uid_real: int, uid_temp: str) -> bool:
     if not tracking_str:
         return False
     try:
-        tracking_data = ast.literal_eval(tracking_str)
+        tracking_data = json.loads(tracking_str)
         if "fbp" in tracking_data:
             r.set(f"fbp:{uid_real}", tracking_data["fbp"], ex=604800)
         if "fbc" in tracking_data:
@@ -164,8 +229,8 @@ def vincular_tracking_por_uid_temp(uid_real: int, uid_temp: str) -> bool:
         r.expire(f"tracking:{uid_temp}", 300)
         logger.info(f"✅ [VÍNCULO] {uid_temp} → UID {uid_real} | FBP: {bool(tracking_data.get('fbp'))}")
         return True
-    except Exception as e:
-        logger.error(f"❌ Erro ao vincular tracking: {e}")
+    except Exception:
+        logger.exception("❌ Erro ao vincular tracking")
         return False
 
 # ====================== APEX JOINED FALLBACK ======================
@@ -176,25 +241,27 @@ def apex_joined_fallback(uid: int):
     r.delete(f"pending_join:{uid}")
     matched = False
     try:
-        keys = r.keys("tracking:track_*")
-        for key in keys:
-            uid_temp = key.replace("tracking:", "")
+        for key in r.scan_iter(match="tracking:track_*"):
+            # key pode ser str ou bytes dependendo do client
+            key_str = key.decode() if isinstance(key, bytes) else key
+            uid_temp = key_str.replace("tracking:", "")
             if r.get(f"bridge:{uid_temp}"):
                 continue
-            ttl = r.ttl(key)
-            if ttl < (86400 - 60):
-                logger.info(f"⏭️ [FALLBACK] {uid_temp} ignorado — tracking antigo (TTL: {ttl})")
+            ttl = r.ttl(f"tracking:{uid_temp}")
+            # ignorar tracking com TTL muito baixo (ex.: < 60s)
+            if ttl is not None and ttl < 60:
+                logger.info(f"⏭️ [FALLBACK] {uid_temp} ignorado — tracking muito velho (TTL: {ttl})")
                 continue
-            vincular_tracking_por_uid_temp(uid, uid_temp)
-            r.set(f"bridge:{uid_temp}", str(uid), ex=3600)
-            logger.info(f"🔁 [FALLBACK MATCH] {uid_temp} → {uid}")
-            matched = True
-            break
-    except Exception as e:
-        logger.error(f"❌ Erro no fallback match: {e}")
+            if vincular_tracking_por_uid_temp(uid, uid_temp):
+                r.set(f"bridge:{uid_temp}", str(uid), ex=3600)
+                logger.info(f"🔁 [FALLBACK MATCH] {uid_temp} → {uid}")
+                matched = True
+                break
+    except Exception:
+        logger.exception("❌ Erro no fallback match")
     enviar_lead_capi(uid, "fallback_com_match" if matched else "apex_joined_sem_start")
 
-# ====================== HANDLERS ======================
+# ====================== HANDLERS TELEGRAM ======================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     args = context.args
@@ -227,7 +294,6 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     r.delete(f"pending_join:{uid}")
     enviar_lead_capi(uid, "start")
 
-
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid = query.from_user.id
@@ -252,9 +318,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         enviar_initiatecheckout_capi(uid)
 
 # ====================== ENGINE ======================
-app = Flask(__name__)
-application = Application.builder().token(TELEGRAM_TOKEN).build()
-
 application.add_handler(CommandHandler("start", start_handler))
 application.add_handler(CallbackQueryHandler(button_handler))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
@@ -294,14 +357,18 @@ def apex_tracking():
     if fbc:
         tracking_data["fbc"] = fbc
     elif fbclid:
-        tracking_data["fbc"] = f"fb.1.{int(time.time() * 1000)}.{fbclid}"
+        # usar timestamp em segundos
+        tracking_data["fbc"] = f"fb.1.{int(time.time())}.{fbclid}"
     if client_ip:
         tracking_data["client_ip"] = client_ip.split(',')[0].strip()
     if client_user_agent:
         tracking_data["client_user_agent"] = client_user_agent
 
-    r.set(f"tracking:{uid}", str(tracking_data), ex=86400)
-    logger.info(f"💾 [TRACKING RECEBIDO E SALVO] uid={uid} | FBP: {bool(fbp)}")
+    try:
+        r.set(f"tracking:{uid}", json.dumps(tracking_data), ex=86400)
+        logger.info(f"💾 [TRACKING RECEBIDO E SALVO] uid={uid} | keys={list(tracking_data.keys())}")
+    except Exception:
+        logger.exception("Erro ao salvar tracking no Redis")
 
     # RETRO-VÍNCULO via pending_uid (o /start desistiu de esperar)
     uid_real = r.get(f"pending_uid:{uid}")
@@ -328,8 +395,8 @@ def webhook():
             update = Update.de_json(data, application.bot)
             asyncio.run_coroutine_threadsafe(application.process_update(update), bot_loop)
         return "ok", 200
-    except Exception as e:
-        logger.error(f"❌ Erro Webhook: {e}")
+    except Exception:
+        logger.exception("❌ Erro Webhook")
         return "error", 500
 
 @app.route('/apex-webhook', methods=['POST'])
@@ -339,7 +406,6 @@ def apex_webhook():
     uid     = data.get("customer", {}).get("chat_id")
     val_raw = data.get("transaction", {}).get("plan_value", 0)
 
-    logger.info(f"[APEX WEBHOOK] Payload completo: {data}")
     logger.info(f"[APEX WEBHOOK] Evento={evento} | chat_id={uid}")
 
     if not uid:
@@ -354,7 +420,10 @@ def apex_webhook():
         enviar_initiatecheckout_capi(uid)
 
     elif evento == "payment_approved":
-        valor = float(val_raw) / 100
+        try:
+            valor = float(val_raw) / 100
+        except Exception:
+            valor = 0.0
         enviar_purchase_capi(uid, valor)
 
     return "ok", 200
@@ -367,8 +436,9 @@ def set_webhook():
             await application.bot.set_webhook(url)
         asyncio.run_coroutine_threadsafe(s(), bot_loop).result()
         return f"✅ Webhook configurado: {url}", 200
-    except Exception as e:
-        return str(e), 500
+    except Exception:
+        logger.exception("Erro ao configurar webhook")
+        return "error", 500
 
 @app.route("/", methods=["GET"])
 def home():
