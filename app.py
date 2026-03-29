@@ -398,6 +398,27 @@ def apex_webhook():
 
     return "ok", 200
 
+
+@app.route("/reset-test/<int:uid_real>", methods=["GET"])
+def reset_test(uid_real):
+    from datetime import date
+    keys_deletadas = []
+
+    lock_key = f"lead_sent:{uid_real}:{date.today()}"
+    r.delete(lock_key)
+    keys_deletadas.append(lock_key)
+
+    for k in [f"fbp:{uid_real}", f"fbc:{uid_real}", f"ip:{uid_real}", f"ua:{uid_real}"]:
+        r.delete(k)
+        keys_deletadas.append(k)
+
+    checkout_key = f"checkout_sent:{uid_real}"
+    r.delete(checkout_key)
+    keys_deletadas.append(checkout_key)
+
+    logger.info(f"🧹 [RESET TEST] UID {uid_real} resetado — {len(keys_deletadas)} chaves deletadas")
+    return jsonify({"status": "ok", "resetado": uid_real, "chaves": keys_deletadas}), 200
+
 @app.route("/set-webhook", methods=["GET"])
 def set_webhook():
     url = f"{WEBHOOK_BASE_URL.rstrip('/')}/webhook"
